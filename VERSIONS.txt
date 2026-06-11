@@ -125,6 +125,7 @@ Made QNICE a nicer to work with system for MiSTer2MEGA65
 * TOOLCHAIN: Merged-back assembler from V1.7 branch: This assembler gives much
   more meaningful error messages.
 
+* Emulator: Added headless Batch Mode for scripting and CI
 
 Version 1.6     September 7, 2020
 =================================
