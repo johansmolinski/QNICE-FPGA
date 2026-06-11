@@ -24,6 +24,41 @@ There are three flavors of QNICE emulators:
   which mounts a FAT32 disk image that contains among other things
   also Q-TRIS.
 
+Headless Batch Mode (Scripting / CI)
+------------------------------------
+
+The POSIX Terminal flavor supports a headless batch mode that is made for
+automated testing: it loads one or more `.out` files, initializes the stack
+pointer the same way the monitor's cold start does (`VAR$STACK_START`), sets
+the program counter to the given hexadecimal address and runs:
+
+```
+emulator/qnice -b 0x8000 monitor/monitor.out test_programs/cmp.out
+```
+
+The emulation stops on a `HALT` instruction, on an emulation error, on
+CTRL-C, or - when stdin is not a terminal - when stdin reaches EOF. The
+latter makes piped scripting possible: a program that ends with
+`SYSCALL(exit, 1)` returns to the monitor, the monitor tries to read a
+command from stdin, finds EOF and the emulator terminates cleanly. Exit
+codes: `0` = HALT or stdin EOF, `1` = error, `130` = CTRL-C.
+
+Things to know when scripting the emulator:
+
+* Programs that expect monitor syscalls need `monitor/monitor.out` loaded
+  alongside them, as shown above.
+* You can feed keyboard input to the emulated program by piping it to stdin.
+* In the interactive `Q>` shell, bare numbers are parsed as *decimal*:
+  `RUN 0x8000` starts at address 0x8000, while `RUN 8000` starts at 0x1F40.
+  The `-b` entry address is always parsed as hexadecimal.
+* The interactive `RUN` command does not initialize the stack pointer. Use
+  batch mode (or boot the monitor at address 0) when running programs that
+  use subroutines or syscalls.
+* A runaway program that never reads from stdin cannot be stopped by the
+  EOF logic. Wrap headless runs in an external timeout (`timeout(1)` on
+  Linux, `subprocess(..., timeout=...)` in Python on macOS); the emulator
+  dies cleanly on SIGTERM.
+
 Getting Started
 ---------------
 
