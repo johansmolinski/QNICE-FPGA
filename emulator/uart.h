@@ -56,6 +56,7 @@ typedef struct uart
 
 //flag to ensure restoring a working terminal when closing the emulator by closing the SDL window
 typedef enum {uart_undef, uart_init, uart_rundown} uart_status_t;
+extern uart_status_t uart_status;
 
 unsigned int uart_read_register(uart *, unsigned int);
 void uart_write_register(uart *, unsigned int, unsigned int);
@@ -64,7 +65,7 @@ void uart_run_down();
 
 #ifdef USE_VGA
 int  uart_getchar_thread(void* param);
-bool uart_getchar_thread_running;
+extern bool uart_getchar_thread_running;
 void uart_fifo_init();
 void uart_fifo_free();
 #endif
