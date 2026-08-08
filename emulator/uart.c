@@ -47,7 +47,7 @@ extern bool         gbl$cpu_running;              //the getchar thread stops whe
 
 /* Ugly global variable to hold the original tty state in order to restore it during rundown */
 struct termios tty_state_old, tty_state;
-enum uart_status_t uart_status = uart_undef;
+uart_status_t uart_status = uart_undef;
 
 /* Remember if we actually saved a terminal state, so that uart_run_down does not
    restore garbage when stdin is not a terminal (e.g. a pipe in batch mode) */
