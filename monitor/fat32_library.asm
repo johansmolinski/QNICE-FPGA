@@ -2319,10 +2319,11 @@ _F32_RSIC_C2    MOVE    R8, R0                      ; save device handle
                 ADDC    0, R9
                 ADDC    0, R10
                 ADDC    0, R11
-                CMP     0, R11                      ; too large?
+                ; Device callbacks accept only the 32-bit LBA in R9:R8.
+                ; Both upper words must be zero (MiSTer2MEGA65 issue #51).
+                OR      R10, R11                    ; any bits above bit 31?
                 RBRA    _F32_RSIC_C3, Z
-                CMP     0, R10
-                RBRA    _F32_RSIC_C3, Z
+                MOVE    R0, R8                      ; restore device handle
                 MOVE    FAT32$ERR_SIZE, R9
                 RBRA    _F32_RSIC_END, 1
 

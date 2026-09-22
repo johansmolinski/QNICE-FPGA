@@ -83,6 +83,13 @@ List of changes:
 Improved robustness
 -------------------
 
+* FAT32$RW_SIC: Reject a sector address if either upper word of the 64-bit
+  calculation is nonzero. The previous check could pass a truncated 32-bit
+  address to the disk device (MiSTer2MEGA65 issue #51). Also preserve the device
+  handle when returning the overflow error. The emulator regression test
+  test_programs/fat32_lba.py covers read/write bounds and register preservation
+  without accessing an SD card.
+
 * SD card, Cycle Counter, UART & EAE: Improved VHDL: Convert async. reset to
   synchronous and to consistent falling edge handling
 
