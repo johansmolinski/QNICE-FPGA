@@ -22,6 +22,9 @@
 ;;  AUG-2022:    Support for writing to files on FAT32 file systems (updating existing files only)
 ;;               f32_fwrite, f32_fflush, f32_fclose (by sy2002)
 ;;  NOV-2022:    Added string function called strrplchr to search/replace chars (by sy2002)
+;;  OCT-2026:    Fast FAT32 seek (whole clusters, FAT sector cache, forward from the current
+;;               position) and extent maps for seeking without FAT reads: f32_fmap, f32_fseekm;
+;;               FAT32$FLUSH returns 0 in R9 when there is nothing to flush
 ;;
 ;;
 ;; Bits and pieces:
@@ -115,6 +118,8 @@ f32_fwrite!     RBRA    FAT32$FILE_WB, 1
 f32_fflush!     RBRA    FAT32$FLUSH, 1
 f32_fclose!     RBRA    FAT32$CLOSE, 1
 strrplchr!      RBRA    STR$RPLCHR, 1
+f32_fmap!       RBRA    FAT32$FILE_MAP, 1
+f32_fseekm!     RBRA    FAT32$FILE_SEEK_MAP, 1
 ;
 ;  The actual monitor code starts here:
 ;

@@ -1210,7 +1210,17 @@ _F32_FRB_RET    DECRB
 ;*****************************************************************************
 ;* FAT32$FILE_SEEK position of the read/write pointer within an open file
 ;*
-;* Currently, seeking is always relative to the start of the file.
+;* Seeking is always relative to the start of the file. Seeking to the file
+;* size (one byte past the last byte) is legal: subsequent reads then return
+;* FAT32$EOF.
+;*
+;* The cluster chain is followed cluster by cluster (not sector by sector)
+;* and a FAT sector is only read from the medium when the walk leaves the
+;* FAT sector that is already in the buffer, i.e. once per 128 clusters of a
+;* contiguous file. A seek to a position at or after the current one
+;* continues from the current cluster; a seek backwards starts at the first
+;* cluster of the file. For random access without any FAT reads, see
+;* FAT32$FILE_MAP and FAT32$FILE_SEEK_MAP.
 ;*
 ;* INPUT:  R8  points to a valid file handle
 ;*         R9  LO word of seek position
@@ -1220,200 +1230,608 @@ _F32_FRB_RET    DECRB
 ;*****************************************************************************
 ;
 FAT32$FILE_SEEK INCRB
+                MOVE    R11, R0
+                XOR     R11, R11                    ; R11 = 0: no extent map
+                RSUB    _F32_SEEK, 1
+                MOVE    R0, R11
+                DECRB
+                RET
+;
+;*****************************************************************************
+;* FAT32$FILE_SEEK_MAP is FAT32$FILE_SEEK using an extent map
+;*
+;* The map must have been created by FAT32$FILE_MAP for the same file. The
+;* cluster of the target position is looked up in the map, so the only
+;* medium access of a seek is reading the target sector itself.
+;*
+;* INPUT:  R8  points to a valid file handle
+;*         R9  LO word of seek position
+;*         R10 HI word of seek position
+;*         R11 points to the extent map
+;* OUTPUT: R8  still points to file handle
+;*         R9  0, if OK, otherwise error code
+;*****************************************************************************
+;
+FAT32$FILE_SEEK_MAP RSUB _F32_SEEK, 1
+                RET
+;
+;*****************************************************************************
+;* FAT32$FILE_MAP creates an extent map of an open file
+;*
+;* The map describes the cluster chain of the file as a list of runs of
+;* consecutive clusters ("extents"), so that FAT32$FILE_SEEK_MAP can find the
+;* cluster of any position without reading the FAT. A file that was copied
+;* to a freshly formatted medium usually consists of a single extent.
+;*
+;* Map layout (16-bit words):
+;*   word 0:       number of extents n
+;*   then n times: first cluster LO, first cluster HI,
+;*                 number of clusters LO, number of clusters HI
+;* A map buffer of S words therefore holds (S - 1) / 4 extents.
+;*
+;* The read/write position of the file handle does not change, but the
+;* 512-byte sector buffer is used for reading the FAT, so the next access of
+;* any handle re-reads its sector.
+;*
+;* INPUT:  R8  points to a valid file handle
+;*         R9  points to the map buffer
+;*         R10 size of the map buffer in words (at least 1)
+;* OUTPUT: R8  still points to file handle
+;*         R9  0 if OK; FAT32$ERR_MAPSIZE if the map buffer is too small
+;*             (word 0 of the map is then 0); otherwise an error code
+;*         R10 number of extents of the file (also if the buffer is too
+;*             small; undefined in case of other errors)
+;*****************************************************************************
+;
+FAT32$FILE_MAP  MOVE    R11, @--SP
+                MOVE    R12, @--SP
+                SUB     6, SP                       ; SP+0..1: FAT sector cache
+                                                    ; SP+2..5: current extent
+                MOVE    SP, R11
+                MOVE    0xFFFF, @R11++              ; nothing cached yet
+                MOVE    0xFFFF, @R11
+                INCRB
 
-                MOVE    R8, R0                      ; R0 = file handle
-                MOVE    R9, R1                      ; R2|R1 = HI|LO seek pos
-                MOVE    R10, R2
-                MOVE    R11, R3
+                MOVE    R8, R0                      ; R0: FDH
+                MOVE    R9, R1                      ; R1: map write pointer
+                MOVE    R10, R2                     ; R2: capacity in extents
+                SUB     1, R2
+                SHR     2, R2
+                AND     0x3FFF, R2
+                MOVE    0, @R1++                    ; invalid until complete
+                XOR     R3, R3                      ; R3: number of extents
 
-                ; if the seek position is larger than the file size,
-                ; then skip the function;
-                ; the 32bit compare is done via a 32bit sub and then
-                ; checking for a negative result via the carry flag
-                MOVE    R0, R4
-                ADD     FAT32$FDH_SIZE_LO, R4
-                MOVE    @R4, R4                     ; file size LO
-                MOVE    R0, R5
-                ADD     FAT32$FDH_SIZE_HI, R5       ; file size HI
-                MOVE    @R5, R5
-                SUB     R1, R4
-                SUBC    R2, R5
-                RBRA    _F32_FS_START, !C           ; seekpos <= filesize
-                MOVE    FAT23$ERR_SEEKTOOLARGE, R9
-                RBRA    _F32_FS_RET, 1
+                ; flush the owner of the sector buffer and release the buffer
+                ; because it is going to hold FAT sectors
+                RSUB    _F32_RELEASE_BUF, 1
+                CMP     0, R9
+                RBRA    _F32_FM_RET, !Z
 
-                ; 1. restore cluster/sector/etc. to the beginning of the file
-                ; 2. divide the 32bit seek position by 512
-                ; 3. push the index forward <quotient> times
-                ;    (this equals following the potentially fragmented cluster
-                ;    struct. of the file just like if we would be reading it)
-                ; 4. set the the new index to the <modulo>
+                ; file size 0: no clusters, empty map
+                MOVE    R0, R8
+                ADD     FAT32$FDH_SIZE_LO, R8
+                MOVE    @R8++, R9                   ; R9: size LO
+                MOVE    @R8, R10                    ; R10: size HI
+                MOVE    R9, R8
+                OR      R10, R8
+                RBRA    _F32_FM_DONE, Z
 
-                ; restore the current cluster/sector and the other state
-                ; variables in the FDH to the beginning of the file
-                ;
-                ; before we do this, we need to flush the 512 byte sector
-                ; buffer using the file handle of the owner of the buffer
-                ;
-                ; @TODO: Make this configurable in future, so that we
-                ; can support the three seek-modes that for example the
-                ; C fseek function supports)
-_F32_FS_START   MOVE    R0, R8                      ; R8 = current FDH
-                ADD     FAT32$FDH_DEVICE, R8
-                MOVE    @R8, R8                     ; R8 = device handle
-                ADD     FAT32$DEV_BUFFERED_FDH, R8
-                MOVE    @R8, R8                     ; R8 = FDH of buf. owner
-                RSUB    FAT32$FLUSH, 1              ; flush sector buffer
-                CMP     0, R9                       ; error?
-                RBRA    _F32_FS_RET, !Z             ; yes: end
-
-                MOVE    R0, R8
-                ADD     FAT32$FDH_START_CLUS_LO, R8
-                MOVE    R0, R9
-                ADD     FAT32$FDH_CLUSTER_LO, R9
-                MOVE    @R8, @R9
-                MOVE    R0, R8
-                ADD     FAT32$FDH_START_CLUS_HI, R8
-                MOVE    R0, R9
-                ADD     FAT32$FDH_CLUSTER_HI, R9
-                MOVE    @R8, @R9
-                MOVE    R0, R8
-                ADD     FAT32$FDH_SECTOR, R8
-                MOVE    0, @R8
-                MOVE    R0, R8
-                ADD     FAT32$FDH_INDEX, R8
-                MOVE    0, @R8
-                MOVE    R0, R8
-                ADD     FAT32$FDH_ACCESS_LO, R8
-                MOVE    0, @R8
-                MOVE    R0, R8
-                ADD     FAT32$FDH_ACCESS_HI, R8
-                MOVE    0, @R8
-
-                ; divide the 32bit seek position by 512
-                MOVE    R1, R8                      ; R9|R8 = HI|LO dividend
-                MOVE    R2, R9
-                MOVE    FAT32$SECTOR_SIZE, R10      ; R11|R10 = HI|LO divisor
+                ; R5|R4: remaining clusters = ceil(size / cluster size) - 1
+                MOVE    R9, R8                      ; R9|R8: size
+                MOVE    R10, R9
+                ADD     0x01FF, R8                  ; sectors = (size+511)/512
+                ADDC    0, R9
+                MOVE    0x0200, R10
                 XOR     R11, R11
                 RSUB    MTH$DIVU32, 1
-
-                ; result of division: R9|R8   = HI|LO integer result
-                ;                     R11|R10 = HI|LO modulo
-                ;
-                ; R11 is always 0, since since we only support 512-byte sector
-                ; sizes
-                ;
-                ; special case: if R9 == R8 == 0, then we are at the very
-                ; first sector of the file and FAT32$READ_FDH will not be
-                ; called; therefore we need to fill the 512-byte sector buffer
-                ; "manually" and claim ownership
-                CMP     0, R9
-                RBRA    _F32_FS_SPECC1, Z
-                RBRA    _F32_FS_LPREP, 1
-_F32_FS_SPECC1  CMP     0, R8
-                RBRA    _F32_FS_LPREP, !Z
-
-                MOVE    R0, R8                      ; R8 = FDH
-
-                INCRB
-                MOVE    R10, R0                     ; remember R10..R12
-                MOVE    R11, R1
-                MOVE    R12, R2
-
-                MOVE    R8, R7                      ; R7 = remember FDH
-                MOVE    R8, R9                      ; FAT32$RW_SIC parameters
-                ADD     FAT32$FDH_CLUSTER_LO, R9
-                MOVE    @R9, R9
-                MOVE    R8, R10
-                ADD     FAT32$FDH_CLUSTER_HI, R10
+                MOVE    R0, R10                     ; clusters = (sectors +
+                ADD     FAT32$FDH_DEVICE, R10       ;  spc - 1) / spc
                 MOVE    @R10, R10
-                XOR     R11, R11                    ; R11 = sector in cluster
-                XOR     R12, R12                    ; R12 = 0: read
-                ADD     FAT32$FDH_DEVICE, R8
-                MOVE    @R8, R8                     ; R8 = device handle
-                RSUB    FAT32$RW_SIC, 1
-                CMP     0, R9                       ; all OK?
-                RBRA    _F32_FS_SPECC2, Z           ; yes
+                ADD     FAT32$DEV_SECT_PER_CLUS, R10
+                MOVE    @R10, R10                   ; R10: sectors per cluster
+                ADD     R10, R8
+                ADDC    0, R9
+                SUB     1, R8
+                SUBC    0, R9
+                XOR     R11, R11
+                RSUB    MTH$DIVU32, 1
+                MOVE    R8, R4
+                MOVE    R9, R5
+                SUB     1, R4
+                SUBC    0, R5
 
-                DECRB                               ; no: return error
-                RBRA    _F32_FS_RET, 1
-
-                ; claim ownership of 512-byte buffer
-_F32_FS_SPECC2  ADD     FAT32$DEV_BUFFERED_FDH, R8  ; R8 = still device handle
-                MOVE    R7, @R8                     ; R7 = FDH
-
-                MOVE    R0, R10                     ; restore R10..R12
-                MOVE    R1, R11
-                MOVE    R2, R12
-                DECRB
-                RBRA    _F32_FS_INDEX, 1            ; R10 contains index
-
-                ; push the index forward R9|R8 = <quotient> times
-                ; pushing is done by setting the index to the sector size
-                ; (which is normally 512) and then using FAT32$READ_FDH
-_F32_FS_LPREP   MOVE    R8, R4                      ; R5|R4 = HI|LO of the ..
-                MOVE    R9, R5                      ; 32bit amount to push                
-
-_F32_FS_LOOP    CMP     R4, 0                       ; still anything to push?
-                RBRA    _F32_FS_IPUSH, !Z
-                CMP     R5, 0
-                RBRA    _F32_FS_IPUSH, !Z
-                RBRA    _F32_FS_INDEX, 1
-
-_F32_FS_IPUSH   SUB     1, R4                       ; 32bit sub 1 from R5|R4
-                SUBC    0, R5 
-                MOVE    R0, R6
-                ADD     FAT32$FDH_INDEX, R6
-                MOVE    FAT32$SECTOR_SIZE, @R6      ; set index to push mode
+                ; R7|R6: current cluster = first cluster of the file;
+                ; the current extent starts with it and is 1 cluster long
                 MOVE    R0, R8
-                MOVE    1, R9                       ; R9=1: "seek mode"
-                RSUB    FAT32$READ_FDH, 1
-                CMP     0, R9                       ; error?
-                RBRA    _F32_FS_IPUSH2, Z           ; no: continue
-                RBRA    _F32_FS_RET, 1              ; yes: quit
-_F32_FS_IPUSH2  MOVE    R0, R6                      ; 32bit add the amount ..
-                ADD     FAT32$FDH_ACCESS_LO, R6     ; .. of read bytes to ..
-                MOVE    R0, R7                      ; .. the file handle
-                ADD     FAT32$FDH_ACCESS_HI, R7
-                ADD     FAT32$SECTOR_SIZE, @R6
-                ADDC    0, @R7
-                RBRA    _F32_FS_LOOP, 1             ; next iteration
+                ADD     FAT32$FDH_START_CLUS_LO, R8
+                MOVE    @R8++, R6                   ; START_CLUS_HI follows
+                MOVE    @R8, R7
+                MOVE    SP, R8
+                ADD     2, R8
+                MOVE    R6, @R8++
+                MOVE    R7, @R8++
+                MOVE    1, @R8++
+                MOVE    0, @R8
 
-                ; set the new index to the <modulo>
-_F32_FS_INDEX   MOVE    R0, R6
-                ADD     FAT32$FDH_INDEX, R6
-                MOVE    R10, @R6                    ; set index to modulo
-                MOVE    R0, R6                      ; 32bit add the amount ..
-                ADD     FAT32$FDH_ACCESS_LO, R6     ; .. of read bytes to ..
-                MOVE    R0, R7                      ; .. the file handle
-                ADD     FAT32$FDH_ACCESS_HI, R7
-                ADD     R10, @R6
-                ADDC    0, @R7
+                ; walk the remaining clusters
+_F32_FM_LOOP    MOVE    R4, R8
+                OR      R5, R8
+                RBRA    _F32_FM_LAST, Z             ; no more clusters
 
-                ; since FAT32$READ_FDH did not read due to seek mode, we
-                ; need to read manually here; but the ownership of the sector
-                ; buffer is correctly set thanks to FAT32$READ_FDH
-                MOVE    R0, R6
-                ADD     FAT32$FDH_DEVICE, R6
-                MOVE    @R6, R8                     ; R8: device handle
-                MOVE    R0, R6
-                ADD     FAT32$FDH_CLUSTER_LO, R6
-                MOVE    @R6, R9                     ; R9: lo word of cluster
-                MOVE    R0, R6
-                ADD     FAT32$FDH_CLUSTER_HI, R6
-                MOVE    @R6, R10                    ; R10: hi word of cluster
-                MOVE    R0, R6
-                ADD     FAT32$FDH_SECTOR, R6
-                MOVE    @R6, R11                    ; R11: sector in cluster
-                XOR     R12, R12                    ; R12 = 0: read
-                RSUB    FAT32$RW_SIC, 1             ; R9 contains 0 or error
+                MOVE    R0, R8
+                ADD     FAT32$FDH_DEVICE, R8
+                MOVE    @R8, R8                     ; R8: device handle
+                MOVE    R6, R9
+                MOVE    R7, R10
+                MOVE    SP, R11                     ; R11: FAT sector cache
+                RSUB    _F32_FATNEXT, 1             ; R11|R10: next cluster
+                CMP     0, R9
+                RBRA    _F32_FM_RET, !Z
 
-_F32_FS_RET     MOVE    R0, R8                      ; restore R8 and R10
-                MOVE    R2, R10
-                MOVE    R3, R11
+                ; contiguous if next == current + 1
+                ADD     1, R6
+                ADDC    0, R7
+                CMP     R10, R6
+                RBRA    _F32_FM_NEW, !Z
+                CMP     R11, R7
+                RBRA    _F32_FM_NEW, !Z
 
+                MOVE    SP, R8                      ; extend the extent
+                ADD     4, R8
+                ADD     1, @R8++
+                ADDC    0, @R8
+                RBRA    _F32_FM_NEXT, 1
+
+_F32_FM_NEW     RSUB    _F32_FM_EMIT, 1             ; emit the current extent
+                MOVE    SP, R8                      ; and start a new one
+                ADD     2, R8
+                MOVE    R10, @R8++
+                MOVE    R11, @R8++
+                MOVE    1, @R8++
+                MOVE    0, @R8
+
+_F32_FM_NEXT    MOVE    R10, R6                     ; current = next
+                MOVE    R11, R7
+                SUB     1, R4                       ; one cluster less to go
+                SUBC    0, R5
+                RBRA    _F32_FM_LOOP, 1
+
+_F32_FM_LAST    RSUB    _F32_FM_EMIT, 1             ; emit the last extent
+
+                ; complete: the map is only valid if all extents fit
+_F32_FM_DONE    MOVE    R3, R10                     ; R10: number of extents
+                MOVE    FAT32$ERR_MAPSIZE, R9
+                CMP     0xFFFF, R2                  ; capacity exceeded?
+                RBRA    _F32_FM_RETX, Z
+                MOVE    R3, R8                      ; word 0 = write pointer
+                ADD     R8, R8                      ;  - 4 * extents - 1
+                ADD     R8, R8
+                MOVE    R1, R11
+                SUB     R8, R11
+                SUB     1, R11
+                MOVE    R3, @R11                    ; word 0: number of extents
+                XOR     R9, R9
+                RBRA    _F32_FM_RETX, 1
+
+_F32_FM_RET     MOVE    R3, R10                     ; error exit
+_F32_FM_RETX    MOVE    R0, R8
                 DECRB
-                RET                
+                ADD     6, SP
+                MOVE    @SP++, R12
+                MOVE    @SP++, R11
+                RET
+
+                ; helper of FAT32$FILE_MAP (same register bank, so no
+                ; INCRB): counts the current extent in R3 and copies it from
+                ; the stack frame of FAT32$FILE_MAP into the map if there is
+                ; still room (R2 = remaining capacity; 0xFFFF = exceeded)
+_F32_FM_EMIT    ADD     1, R3
+                CMP     0, R2
+                RBRA    _F32_FM_EMIT1, !Z
+                MOVE    0xFFFF, R2                  ; no room: map incomplete
+                RET
+_F32_FM_EMIT1   CMP     0xFFFF, R2
+                RBRA    _F32_FM_EMIT2, !Z
+                RET                                 ; already exceeded
+_F32_FM_EMIT2   SUB     1, R2
+                MOVE    SP, R9                      ; SP points to the return
+                ADD     3, R9                       ; address: frame is SP+1
+                MOVE    @R9++, @R1++
+                MOVE    @R9++, @R1++
+                MOVE    @R9++, @R1++
+                MOVE    @R9, @R1++
+                RET
+;
+;*****************************************************************************
+;* _F32_SEEK: the common core of FAT32$FILE_SEEK and FAT32$FILE_SEEK_MAP
+;*
+;* INPUT:  R8  file handle
+;*         R9  LO word of seek position
+;*         R10 HI word of seek position
+;*         R11 extent map or 0 (follow the cluster chain)
+;* OUTPUT: R8  file handle
+;*         R9  0, if OK, otherwise error code
+;*         R10, R11, R12 unchanged
+;*****************************************************************************
+;
+_F32_SEEK       MOVE    R10, @--SP
+                MOVE    R11, @--SP
+                MOVE    R12, @--SP
+                INCRB
+
+                MOVE    R8, R0                      ; R0: FDH
+                MOVE    R9, R1                      ; R2|R1: seek position
+                MOVE    R10, R2
+                MOVE    R11, R3                     ; R3: extent map or 0
+
+                ; the seek position must not be larger than the file size
+                ; (32-bit compare via subtraction: borrow = larger)
+                MOVE    R0, R8
+                ADD     FAT32$FDH_SIZE_LO, R8
+                MOVE    @R8++, R9                   ; R9: size LO
+                MOVE    @R8, R10                    ; R10: size HI
+                MOVE    R9, R6
+                MOVE    R10, R7
+                SUB     R1, R6
+                SUBC    R2, R7
+                RBRA    _F32_SK_RANGE, !C
+                MOVE    FAT23$ERR_SEEKTOOLARGE, R9
+                RBRA    _F32_SK_RET, 1
+
+                ; flush the owner of the sector buffer and release it,
+                ; because walking the chain reads FAT sectors into it
+_F32_SK_RANGE   MOVE    R0, R8                      ; R8: FDH
+                RSUB    _F32_RELEASE_BUF, 1
+                CMP     0, R9
+                RBRA    _F32_SK_RET, !Z
+
+                ; R4: 1, if the target is the end of the file (position ==
+                ; size, R7|R6 = 0 from the compare above). We then position
+                ; on the last byte instead and add 1 to index and access
+                ; position, so that we never step past the cluster chain.
+                ; A file of size 0 has no clusters: only the access position
+                ; needs to be set.
+                XOR     R4, R4
+                MOVE    R6, R8
+                OR      R7, R8
+                RBRA    _F32_SK_POS, !Z             ; not the end of the file
+                MOVE    R1, R8
+                OR      R2, R8
+                RBRA    _F32_SK_LAST, !Z            ; size > 0
+                MOVE    R0, R8                      ; size = 0: access = 0
+                ADD     FAT32$FDH_ACCESS_LO, R8
+                MOVE    0, @R8++
+                MOVE    0, @R8
+                XOR     R9, R9
+                RBRA    _F32_SK_RET, 1
+_F32_SK_LAST    MOVE    1, R4
+                SUB     1, R1                       ; position := last byte
+                SUBC    0, R2
+
+                ; R5: index within the sector, R6: sector within the cluster,
+                ; R9|R8: number of the cluster within the file
+_F32_SK_POS     MOVE    R1, R8
+                MOVE    R2, R9
+                MOVE    FAT32$SECTOR_SIZE, R10
+                XOR     R11, R11
+                RSUB    MTH$DIVU32, 1               ; R9|R8 = sector in file
+                MOVE    R10, R5                     ; R5 = index in sector
+                MOVE    R0, R10
+                ADD     FAT32$FDH_DEVICE, R10
+                MOVE    @R10, R10
+                ADD     FAT32$DEV_SECT_PER_CLUS, R10
+                MOVE    @R10, R10
+                XOR     R11, R11
+                RSUB    MTH$DIVU32, 1               ; R9|R8 = cluster in file
+                MOVE    R10, R6                     ; R6 = sector in cluster
+
+                ; find the cluster: R11|R10 = cluster number
+                MOVE    R9, R10
+                MOVE    R8, R9
+                MOVE    R0, R8
+                MOVE    R3, R11
+                RSUB    _F32_CLUSTER_AT, 1
+                CMP     0, R9
+                RBRA    _F32_SK_RET, !Z
+
+                ; update the file handle
+                MOVE    R0, R8
+                ADD     FAT32$FDH_CLUSTER_LO, R8
+                MOVE    R10, @R8++                  ; CLUSTER_HI follows LO
+                MOVE    R11, @R8
+                MOVE    R0, R8
+                ADD     FAT32$FDH_SECTOR, R8
+                MOVE    R6, @R8
+                MOVE    R0, R8
+                ADD     FAT32$FDH_INDEX, R8
+                MOVE    R5, @R8
+                ADD     R4, @R8                     ; + 1 at the end of file
+                ADD     R4, R1                      ; access := position
+                ADDC    0, R2                       ; (+ 1 at the end of file)
+                MOVE    R0, R8
+                ADD     FAT32$FDH_ACCESS_LO, R8
+                MOVE    R1, @R8++                   ; ACCESS_HI follows LO
+                MOVE    R2, @R8
+
+                ; read the target sector and claim the sector buffer
+                MOVE    R10, R9                     ; R9: cluster LO
+                MOVE    R11, R10                    ; R10: cluster HI
+                MOVE    R6, R11                     ; R11: sector in cluster
+                XOR     R12, R12                    ; R12: 0 = read
+                MOVE    R0, R8
+                ADD     FAT32$FDH_DEVICE, R8
+                MOVE    @R8, R8                     ; R8: device handle
+                RSUB    FAT32$RW_SIC, 1
+                CMP     0, R9
+                RBRA    _F32_SK_RET, !Z
+                ADD     FAT32$DEV_BUFFERED_FDH, R8
+                MOVE    R0, @R8
+
+_F32_SK_RET     MOVE    R0, R8
+                DECRB
+                MOVE    @SP++, R12
+                MOVE    @SP++, R11
+                MOVE    @SP++, R10
+                RET
+;
+;*****************************************************************************
+;* _F32_CLUSTER_AT returns the cluster number of the n-th cluster of a file
+;*
+;* With an extent map, the cluster is looked up in the map. Without one, the
+;* cluster chain is followed: from the current cluster of the file handle if
+;* the target is not before it, otherwise from the first cluster of the file.
+;*
+;* INPUT:  R8  file handle
+;*         R9  LO word of n (0 = first cluster of the file)
+;*         R10 HI word of n
+;*         R11 extent map or 0
+;* OUTPUT: R8  file handle
+;*         R9  0, if OK, otherwise error code
+;*         R10 LO word of the cluster number
+;*         R11 HI word of the cluster number
+;*         R12 unchanged
+;*****************************************************************************
+;
+_F32_CLUSTER_AT MOVE    R12, @--SP
+                SUB     2, SP                       ; SP+0..1: FAT sector cache
+                MOVE    SP, R12
+                MOVE    0xFFFF, @R12++              ; nothing cached yet
+                MOVE    0xFFFF, @R12
+                INCRB
+
+                MOVE    R8, R0                      ; R0: FDH
+                MOVE    R9, R1                      ; R2|R1: n
+                MOVE    R10, R2
+                CMP     0, R11
+                RBRA    _F32_CA_WALK, Z
+
+                ; extent map: subtract the extent lengths from n until n is
+                ; within an extent
+                MOVE    @R11++, R3                  ; R3: number of extents
+_F32_CA_MLOOP   CMP     0, R3
+                RBRA    _F32_CA_ECHAIN, Z           ; n is beyond the map
+                MOVE    @R11++, R4                  ; R5|R4: first cluster
+                MOVE    @R11++, R5
+                MOVE    @R11++, R6                  ; R7|R6: length
+                MOVE    @R11++, R7
+                MOVE    R1, R8                      ; n - length
+                MOVE    R2, R9
+                SUB     R6, R8
+                SUBC    R7, R9
+                RBRA    _F32_CA_MHIT, C             ; borrow: n < length
+                MOVE    R8, R1
+                MOVE    R9, R2
+                SUB     1, R3
+                RBRA    _F32_CA_MLOOP, 1
+_F32_CA_MHIT    ADD     R1, R4                      ; first cluster + n
+                ADDC    R2, R5
+                RBRA    _F32_CA_FOUND, 1
+
+                ; walk the chain: R5|R4 = start cluster, R7|R6 = steps
+_F32_CA_WALK    MOVE    R0, R8
+                ADD     FAT32$FDH_CLUSTER_LO, R8
+                MOVE    @R8++, R4                   ; R5|R4: current cluster
+                MOVE    @R8, R5
+
+                ; the current cluster is only usable if it is a data cluster
+                ; (2 .. 0x0FFFFFF7)
+                CMP     0, R5
+                RBRA    _F32_CA_CUR1, !Z
+                CMP     2, R4
+                RBRA    _F32_CA_START, N            ; 2 > cluster: unusable
+_F32_CA_CUR1    CMP     0x0FFF, R5
+                RBRA    _F32_CA_CUR2, !Z
+                CMP     0xFFF8, R4
+                RBRA    _F32_CA_START, !N           ; end-of-chain marker
+
+                ; index of the current cluster within the file:
+                ; (access - index) / 512 / sectors per cluster (the sector
+                ; within the cluster vanishes in the integer division, but
+                ; the index must be subtracted: it can be 512)
+_F32_CA_CUR2    MOVE    R0, R8
+                ADD     FAT32$FDH_ACCESS_LO, R8
+                MOVE    @R8++, R9                   ; R10|R9: access
+                MOVE    @R8, R10
+                MOVE    R0, R8
+                ADD     FAT32$FDH_INDEX, R8
+                MOVE    @R8, R8
+                SUB     R8, R9
+                SUBC    0, R10
+                MOVE    R9, R8                      ; R9|R8: access - index
+                MOVE    R10, R9
+                MOVE    FAT32$SECTOR_SIZE, R10
+                XOR     R11, R11
+                RSUB    MTH$DIVU32, 1
+                MOVE    R0, R10
+                ADD     FAT32$FDH_DEVICE, R10
+                MOVE    @R10, R10
+                ADD     FAT32$DEV_SECT_PER_CLUS, R10
+                MOVE    @R10, R10
+                XOR     R11, R11
+                RSUB    MTH$DIVU32, 1               ; R9|R8: current index
+
+                ; steps = n - current index, unless the target is behind us
+                MOVE    R1, R6
+                MOVE    R2, R7
+                SUB     R8, R6
+                SUBC    R9, R7
+                RBRA    _F32_CA_STEP, !C            ; no borrow: walk forward
+
+_F32_CA_START   MOVE    R0, R8                      ; from the first cluster
+                ADD     FAT32$FDH_START_CLUS_LO, R8
+                MOVE    @R8++, R4
+                MOVE    @R8, R5
+                MOVE    R1, R6
+                MOVE    R2, R7
+
+_F32_CA_STEP    MOVE    R6, R8
+                OR      R7, R8
+                RBRA    _F32_CA_FOUND, Z            ; arrived
+                MOVE    R0, R8
+                ADD     FAT32$FDH_DEVICE, R8
+                MOVE    @R8, R8                     ; R8: device handle
+                MOVE    R4, R9
+                MOVE    R5, R10
+                MOVE    SP, R11                     ; R11: FAT sector cache
+                RSUB    _F32_FATNEXT, 1
+                CMP     0, R9
+                RBRA    _F32_CA_RET, !Z
+                MOVE    R10, R4
+                MOVE    R11, R5
+                SUB     1, R6
+                SUBC    0, R7
+                RBRA    _F32_CA_STEP, 1
+
+_F32_CA_FOUND   MOVE    R4, R10
+                MOVE    R5, R11
+                XOR     R9, R9
+                RBRA    _F32_CA_RET, 1
+
+_F32_CA_ECHAIN  MOVE    FAT32$ERR_CHAIN, R9
+
+_F32_CA_RET     MOVE    R0, R8
+                DECRB
+                ADD     2, SP
+                MOVE    @SP++, R12
+                RET
+;
+;*****************************************************************************
+;* _F32_FATNEXT returns the successor of a cluster in the cluster chain
+;*
+;* The FAT sector is read into the 512-byte sector buffer unless it is the
+;* one that the cache says is already there. The caller must have released
+;* the sector buffer (see _F32_RELEASE_BUF) and owns the 2-word cache, which
+;* starts out as 0xFFFF / 0xFFFF (nothing cached).
+;*
+;* INPUT:  R8  device handle
+;*         R9  LO word of the cluster
+;*         R10 HI word of the cluster
+;*         R11 points to the cache: LBA of the FAT sector in the buffer
+;* OUTPUT: R8  device handle
+;*         R9  0 if OK; FAT32$ERR_CHAIN if the successor is not a data
+;*             cluster (end of chain, free or bad); otherwise an error code
+;*         R10 LO word of the successor
+;*         R11 HI word of the successor
+;*         R12 unchanged
+;*****************************************************************************
+;
+_F32_FATNEXT    INCRB
+                MOVE    R8, R0                      ; R0: device handle
+                MOVE    R9, R1                      ; R1: cluster LO
+                MOVE    R11, R3                     ; R3: cache
+
+                ; LBA of the FAT sector = FAT start + cluster / 128:
+                ; R5|R4 = cluster >> 7 (the masks discard the fill bits)
+                MOVE    R9, R4
+                SHR     7, R4
+                AND     0x01FF, R4
+                MOVE    R10, R5
+                SHL     9, R5
+                AND     0xFE00, R5
+                OR      R5, R4
+                MOVE    R10, R5
+                SHR     7, R5
+                AND     0x01FF, R5
+                MOVE    R0, R6
+                ADD     FAT32$DEV_FAT_LO, R6
+                MOVE    @R6++, R8                   ; DEV_FAT_HI follows LO
+                MOVE    @R6, R9
+                ADD     R8, R4
+                ADDC    R9, R5
+
+                ; read the FAT sector unless it is already in the buffer
+                CMP     @R3, R4
+                RBRA    _F32_FN_READ, !Z
+                MOVE    R3, R6
+                ADD     1, R6
+                CMP     @R6, R5
+                RBRA    _F32_FN_HAVE, Z
+_F32_FN_READ    MOVE    R4, R8
+                MOVE    R5, R9
+                MOVE    FAT32$DEV_BLOCK_READ, R10
+                MOVE    R0, R11
+                RSUB    FAT32$CALL_DEV, 1
+                CMP     0, R8
+                RBRA    _F32_FN_RDOK, Z
+                MOVE    R8, R9                      ; read error
+                MOVE    0xFFFF, @R3                 ; buffer content unknown
+                RBRA    _F32_FN_RET, 1
+_F32_FN_RDOK    MOVE    R4, @R3                     ; remember the FAT sector
+                MOVE    R3, R6
+                ADD     1, R6
+                MOVE    R5, @R6
+
+                ; the entry: 4 bytes at (cluster % 128) * 4, 28 bits used
+_F32_FN_HAVE    MOVE    R0, R8
+                MOVE    R1, R9
+                AND     0x007F, R9
+                SHL     2, R9
+                AND     0x01FC, R9
+                RSUB    FAT32$READ_DW, 1            ; R11|R10: entry
+                AND     0x0FFF, R11
+
+                ; data clusters are 2 .. 0x0FFFFFF7
+                CMP     0, R11
+                RBRA    _F32_FN_CHK2, !Z
+                CMP     2, R10
+                RBRA    _F32_FN_BAD, N              ; 2 > entry: free/reserved
+_F32_FN_CHK2    CMP     0x0FFF, R11
+                RBRA    _F32_FN_OK, !Z
+                CMP     0xFFF8, R10
+                RBRA    _F32_FN_OK, N               ; below the EOC markers
+_F32_FN_BAD     MOVE    FAT32$ERR_CHAIN, R9
+                RBRA    _F32_FN_RET, 1
+_F32_FN_OK      XOR     R9, R9
+
+_F32_FN_RET     MOVE    R0, R8
+                DECRB
+                RET
+;
+;*****************************************************************************
+;* _F32_RELEASE_BUF flushes the 512-byte sector buffer and releases it
+;*
+;* Flushes the buffer using the file handle of its current owner and then
+;* marks it as owned by nobody, so that every handle re-reads its sector on
+;* the next access. Used before the buffer is filled with FAT sectors.
+;*
+;* INPUT:  R8  any file handle on the device
+;* OUTPUT: R8  unchanged
+;*         R9  0, if OK, otherwise error code
+;*****************************************************************************
+;
+_F32_RELEASE_BUF INCRB
+                MOVE    R8, R0
+                ADD     FAT32$FDH_DEVICE, R8
+                MOVE    @R8, R1
+                ADD     FAT32$DEV_BUFFERED_FDH, R1  ; R1: owner of the buffer
+                MOVE    @R1, R8
+                RSUB    FAT32$FLUSH, 1              ; R8 = 0 is fine
+                CMP     0, R9
+                RBRA    _F32_RB_RET, !Z
+                MOVE    0, @R1                      ; owned by nobody
+_F32_RB_RET     MOVE    R0, R8
+                DECRB
+                RET
 ;
 ;*****************************************************************************
 ;* FAT32$CD changes the current directory
@@ -2464,7 +2882,7 @@ FAT32$FLUSH     INCRB
                 ; Due the FAT32$DEV_BUFFERED_FDH system, there are situations
                 ; where FLUSH is called with R8 = 0. Do nothing in this case.
                 CMP     0, R8
-                RBRA    _FAT32$FLUSH_Z, Z
+                RBRA    _FAT32$FLUSH_0, Z
 
                 MOVE    R8, R0
                 MOVE    R10, R1
@@ -2521,6 +2939,11 @@ _FAT32$FLUSH_R  DECRB
 
 _FAT32$FLUSH_Z  DECRB
                 RET
+
+                ; R8 = 0: nothing to flush, which is a success (R9 = 0), like
+                ; the documentation promises; R9 used to be left unchanged
+_FAT32$FLUSH_0  XOR     R9, R9
+                RBRA    _FAT32$FLUSH_Z, 1
 ;
 ;*****************************************************************************
 ;* FAT32$CLOSE closes file and writes unwritten changes to disk

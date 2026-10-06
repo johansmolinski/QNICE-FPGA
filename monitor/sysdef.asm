@@ -293,6 +293,8 @@ FAT32$ERR_CORRUPT_DH    .EQU    0xEE18                  ; corrupt directory hand
 FAT32$ERR_DIRNOTFOUND   .EQU    0xEE19                  ; directory not found (illegal path name passed to change directory command)
 FAT32$ERR_FILENOTFOUND  .EQU    0xEE20                  ; file not found
 FAT23$ERR_SEEKTOOLARGE  .EQU    0xEE21                  ; seek position > file size
+FAT32$ERR_CHAIN         .EQU    0xEE22                  ; cluster chain ends before the end of the file or contains a free/reserved cluster
+FAT32$ERR_MAPSIZE       .EQU    0xEE23                  ; FAT32$FILE_MAP: map buffer too small for all extents of the file
 
 ; FAT32 STATUS CODES
 
