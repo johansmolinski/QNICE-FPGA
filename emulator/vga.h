@@ -36,7 +36,7 @@ void            vga_one_iteration_screen();
 
 #if defined(USE_VGA) && !defined(__EMSCRIPTEN__)
 int             vga_main_loop();
-bool            vga_timebase_thread_running;
+extern bool     vga_timebase_thread_running;
 int             vga_timebase_thread(void* param);
 #endif
 

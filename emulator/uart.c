@@ -47,7 +47,15 @@ extern bool         gbl$cpu_running;              //the getchar thread stops whe
 
 /* Ugly global variable to hold the original tty state in order to restore it during rundown */
 struct termios tty_state_old, tty_state;
-enum uart_status_t uart_status = uart_undef;
+uart_status_t uart_status = uart_undef;
+
+/* Remember if we actually saved a terminal state, so that uart_run_down does not
+   restore garbage when stdin is not a terminal (e.g. a pipe in batch mode) */
+static int tty_state_saved = 0;
+
+/* Set to true on EOF of a non-terminal stdin (pipe or file exhausted): stops the
+   emulation instead of feeding an endless stream of 0xff to the running program */
+extern bool gbl$shutdown_signal;
 
 unsigned int uart_read_register(uart *state, unsigned int address)
 {
@@ -74,7 +82,11 @@ unsigned int uart_read_register(uart *state, unsigned int address)
       /* Check if there is a character in the input buffer */
       if ((ret_val = select(1, &fd, NULL, NULL, &tv)) == -1)
       {
-        /* Don't stop here as it might be caused by a catched CTRL-C signal! */
+        /* Don't stop here as it might be caused by a catched CTRL-C signal!
+           But if stdin is not a terminal (e.g. closed or invalid in batch use),
+           a program polling for input would spin forever - shut down instead. */
+        if (!isatty(STDIN_FILENO))
+          gbl$shutdown_signal = true;
       }
       else if (!ret_val) /* No data available */
         state->sra &= 0xfe; /* Do not touch the transmit-ready bit! */
@@ -95,12 +107,26 @@ unsigned int uart_read_register(uart *state, unsigned int address)
 #ifndef USE_VGA
       if ((ret_val = select(1, &fd, NULL, NULL, &tv)) == -1)
       {
-        /* Don't stop here as it might be caused by a catched CTRL-C signal! */
+        /* Don't stop here as it might be caused by a catched CTRL-C signal!
+           But see the comment for the equivalent situation at SRA above. */
+        if (!isatty(STDIN_FILENO))
+          gbl$shutdown_signal = true;
       }
       else if (!ret_val) /* No data available */
         state->rhra = 0;
       else /* Data available */
-        state->rhra = getchar() & 0xff;
+      {
+        int input_char = getchar();
+        if (input_char == EOF && !isatty(STDIN_FILENO))
+        {
+          /* stdin (a pipe or file) is exhausted: stop the emulation instead of
+             feeding an endless stream of 0xff to the running program */
+          gbl$shutdown_signal = true;
+          state->rhra = 0;
+        }
+        else
+          state->rhra = input_char & 0xff;
+      }
 #else
       if (uart_fifo->count)
         state->rhra = fifo_pull(uart_fifo);
@@ -244,12 +270,17 @@ int uart_getchar_thread(void* param)
 
 void uart_hardware_initialization(uart *state)
 {
-  /* Turn off buffering on STDIN and save original state for later */
-  tcgetattr(STDIN_FILENO, &tty_state_old);
-  tty_state = tty_state_old;
-  tty_state.c_lflag &= ~ICANON;
-  tty_state.c_lflag &= ~ECHO;
-  tcsetattr(STDIN_FILENO, TCSANOW, &tty_state);
+  /* Turn off buffering on STDIN and save original state for later. Only do this
+     when stdin actually is a terminal: on a pipe or file (batch mode) these
+     calls would fail and uart_run_down must not restore a garbage state. */
+  if (isatty(STDIN_FILENO) && !tcgetattr(STDIN_FILENO, &tty_state_old))
+  {
+    tty_state = tty_state_old;
+    tty_state.c_lflag &= ~ICANON;
+    tty_state.c_lflag &= ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &tty_state);
+    tty_state_saved = 1;
+  }
 
   /*
   ** bit 1, 0: 11 -> 8 bits/character
@@ -273,8 +304,9 @@ void uart_hardware_initialization(uart *state)
 
 void uart_run_down()
 {
-  /* Reset the terminal to its original settings */
-  tcsetattr(STDIN_FILENO, TCSANOW, &tty_state_old);
+  /* Reset the terminal to its original settings (only if we saved them before) */
+  if (tty_state_saved)
+    tcsetattr(STDIN_FILENO, TCSANOW, &tty_state_old);
   uart_status = uart_rundown;
 }
 

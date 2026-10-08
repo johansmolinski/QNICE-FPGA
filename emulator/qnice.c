@@ -152,6 +152,7 @@ statistic_data gbl$stat;
 bool gbl$cpu_running      = false;              //thread-sync: is the CPU currently running?
 bool gbl$shutdown_signal  = false;              //thread-sync: shut down the emulator when set to true
 bool gbl$initial_run      = true;               //thread-sync: is the current run() the very first one?
+bool gbl$halted           = false;              //true when the CPU stopped due to a HALT instruction
 
 #if defined(USE_VGA) && !defined(__EMSCRIPTEN__)
 sigset_t  gbl$sigset;                           //multithreaded signal handling
@@ -970,6 +971,7 @@ int execute() {
       switch (command = (instruction >> 6) & 0x3f) {
         case HALT_INSTRUCTION:
           printf("HALT instruction executed at address %04X.\n\n", debug_address);
+          gbl$halted = true; /* This is a clean stop, e.g. batch mode exits with 0 */
           return TRUE;
           break;    // Not really necessary but good style... :-)
         case RTI_INSTRUCTION:
@@ -1104,6 +1106,9 @@ void run() {
   if (gbl$initial_run)
     gbl$initial_run = false;
   gbl$ctrl_c = FALSE;
+  gbl$halted = false;
+  /* Deliberately NOT resetting gbl$shutdown_signal here: in the VGA flavor it is
+     the cross-thread teardown latch, and in batch mode a stdin EOF is final. */
 
 #ifdef USE_UART
   uart_hardware_initialization(&gbl$first_uart);
@@ -1527,7 +1532,12 @@ int main(int argc, char **argv) {
         \"qnice -h\" will print this help text\n\
         \"qnice -a <disk_image>\" will attach an SD-card image file\n\
         \"qnice -a <disk_image> <file.bin> \" attaches an images and runs a file\n\
-        \"qnice <file.bin>\" will run in batch mode and print statistics\n\n");
+        \"qnice <file.bin>\" will run in batch mode and print statistics\n\
+        \"qnice [-a <disk_image>] -b <addr> <f.out> [<f2.out> ...]\" headless batch\n\
+                mode: load the file(s), set SP like the monitor's cold start does,\n\
+                set PC to the hexadecimal address <addr> and run. Stops on HALT, on\n\
+                an error, on CTRL-C, or - if stdin is not a terminal - on stdin EOF.\n\
+                Exit code: 0 = HALT or stdin EOF, 1 = error, 130 = CTRL-C.\n\n");
       return 0;
     }
 #ifdef USE_SD
@@ -1539,6 +1549,47 @@ int main(int argc, char **argv) {
 
       sd_attach(*argv++);
     }
+#endif
+  }
+
+  if (*argv && !strcmp(*argv, "-b")) { /* Headless batch mode: load file(s), run, exit */
+#ifndef USE_VGA
+    char *endptr;
+    unsigned long entry_address;
+
+    if (!*++argv) {
+      fprintf(stderr, "Expected a hexadecimal entry address after -b but none found.\n");
+      return 1;
+    }
+    entry_address = strtoul(*argv, &endptr, 16);
+    if (endptr == *argv || *endptr || entry_address >= MEMORY_SIZE) {
+      fprintf(stderr, "Illegal entry address >>%s<< after -b, expected hex such as 0x8000.\n", *argv);
+      return 1;
+    }
+    if (!*++argv) {
+      fprintf(stderr, "Expected at least one file to load after -b <entry_address>.\n");
+      return 1;
+    }
+    for (; *argv; argv++)
+      if (load_binary_file(*argv))
+        return 1;
+
+    /* Mimic the monitor's cold start before jumping into the program: without a
+       valid stack pointer the program's first subroutine call would push its
+       return address into the memory mapped IO area and derail the machine.
+       0xFEEB equals VAR$STACK_START in monitor/variables.asm. */
+    write_register(SP, 0xFEEB);
+    write_register(PC, (unsigned int) entry_address);
+    run();
+
+    if (gbl$ctrl_c)                            /* Interrupted by CTRL-C */
+      return 130;
+    if (gbl$halted || gbl$shutdown_signal)     /* HALT executed or stdin EOF reached */
+      return 0;
+    return 1;                                  /* Illegal instruction or emulation error */
+#else
+    fprintf(stderr, "Batch mode (-b) is not supported in the VGA flavor of the emulator.\n");
+    return 1;
 #endif
   }
 

@@ -387,7 +387,12 @@ _F32_MNT_RVID   MOVE    R0, R8
                 ADD     FAT32$DEV_AD_1STCLUS_HI, R10
                 MOVE    R4, @R10
 
-                ; reset the FDH buffer filling tracker
+                ; Reset the FDH buffer filling tracker: directly after a mount
+                ; nobody owns the 512-byte sector buffer. The buffer is
+                ; deliberately dropped instead of being flushed here, because a
+                ; previous owner describes the layout of the medium that was
+                ; mounted before. Writing it back after a card change would
+                ; place its data at that old position on the new card.
                 MOVE    R0, R10
                 ADD     FAT32$DEV_BUFFERED_FDH, R10
                 XOR     @R10, @R10
@@ -427,6 +432,19 @@ FAT32$DIR_OPEN  INCRB
                 MOVE    R12, R2
 
                 INCRB
+
+                ; This function re-fills the 512-byte sector buffer and claims
+                ; ownership of it further below, so the current owner has to
+                ; write back its data first. Without this, opening a directory
+                ; while another handle is in the middle of writing a sector
+                ; silently discards the bytes that handle has buffered.
+                MOVE    R9, R4                      ; R4: directory handle
+                RSUB    FAT32$FLUSH_OWNER, 1        ; R8: still device handle
+                CMP     0, R9
+                RBRA    _F32_DO_OWNOK, Z
+                MOVE    R4, R8                      ; error: return the handle
+                RBRA    _F32_DO_END, 1
+_F32_DO_OWNOK   MOVE    R4, R9                      ; restore directory handle
 
                 MOVE    R9, R0                      ; save device handle
                 ADD     FAT32$FDH_DEVICE, R0
@@ -473,7 +491,7 @@ FAT32$DIR_OPEN  INCRB
 
                 MOVE    R0, R8                      ; return dir. handle
 
-                DECRB
+_F32_DO_END     DECRB
 
                 MOVE    R0, R10
                 MOVE    R1, R11
@@ -1000,8 +1018,22 @@ FAT32$FILE_OPEN INCRB
                 MOVE    R11, R1
                 MOVE    R12, R7
 
+                ; The 512-byte sector buffer is re-filled for this file further
+                ; below, so its current owner has to write back first. Opening
+                ; a file while another handle is mid-sector would otherwise
+                ; discard the bytes that handle has buffered.
+                RSUB    FAT32$FLUSH_OWNER, 1        ; R8: still device handle
+                CMP     0, R9
+                RBRA    _F32_FO_OWNOK, Z
+                MOVE    R9, R10                     ; report the flush error
+                MOVE    R0, R9                      ; R9: file handle
+                MOVE    R1, R11                     ; restore org. registers
+                MOVE    R7, R12
+                DECRB
+                RET
+
                 ; clear flags inside file handle
-                MOVE    R0, R2
+_F32_FO_OWNOK   MOVE    R0, R2
                 ADD     FAT32$FDH_FLAGS, R2
                 MOVE    0, @R2
 
@@ -2304,8 +2336,31 @@ _F32_DF_SUCCESS MOVE    0, R9                   ; operation was successful
                                                 ; length information
                 RBRA    _F32_DF_NXSG, 1         ; process next path segment
 
+                ; The directory handle that was used above lives on the stack
+                ; and is about to go out of scope. It must not stay registered
+                ; as the owner of the 512-byte sector buffer: the stack memory
+                ; is reused immediately, so a later flush would read the dirty
+                ; flag, cluster and sector from recycled stack contents and
+                ; write the buffer to an arbitrary place on the medium.
+                ; Directory handles are never dirty, so releasing the ownership
+                ; loses nothing. FILE_OPEN claims it again right afterwards.
+                ;
+                ; Release it only if the stack handle really is the owner. This
+                ; label is also the error exit of the DIR_OPEN above, and that
+                ; call can fail because its own flush of a foreign owner failed
+                ; on a medium write error. In that case the buffer still holds
+                ; the data of that foreign handle, which is still dirty and
+                ; still has to be written, so de-registering it here would
+                ; strand it: the ownership check in FAT32$FLUSH would then drop
+                ; the pending data on the next attempt and report success.
+_F32_DF_ENDWR   MOVE    R0, R7                  ; R0: device handle
+                ADD     FAT32$DEV_BUFFERED_FDH, R7
+                CMP     @R7, R5                 ; stack handle still the owner?
+                RBRA    _F32_DF_ENDSP, !Z       ; no: leave the owner alone
+                MOVE    0, @R7                  ; yes: release the ownership
+
                 ; restore SP
-_F32_DF_ENDWR   ADD     FAT32$FDH_STRUCT_SIZE, SP
+_F32_DF_ENDSP   ADD     FAT32$FDH_STRUCT_SIZE, SP
                 ADD     FAT32$DE_STRUCT_SIZE, SP
 
 _F32_DF_ENDNR   ADD     R2, SP                  ; restore stack pointer
@@ -2682,10 +2737,11 @@ _F32_RSIC_C2    MOVE    R8, R0                      ; save device handle
                 ADDC    0, R9
                 ADDC    0, R10
                 ADDC    0, R11
-                CMP     0, R11                      ; too large?
+                ; Device callbacks accept only the 32-bit LBA in R9:R8.
+                ; Both upper words must be zero (MiSTer2MEGA65 issue #51).
+                OR      R10, R11                    ; any bits above bit 31?
                 RBRA    _F32_RSIC_C3, Z
-                CMP     0, R10
-                RBRA    _F32_RSIC_C3, Z
+                MOVE    R0, R8                      ; restore device handle
                 MOVE    FAT32$ERR_SIZE, R9
                 RBRA    _F32_RSIC_END, 1
 
@@ -2867,6 +2923,34 @@ FAT32$READ_DW   INCRB
                 RET
 ;
 ;*****************************************************************************
+;* FAT32$FLUSH_OWNER writes back the sector buffer of its current owner
+;*
+;* There is exactly one 512-byte sector buffer per device. Every function that
+;* is about to re-fill it for a different handle has to call this first,
+;* otherwise the handle that currently owns the buffer loses the bytes it has
+;* already written into it: its dirty flag stays set, the sector is re-read
+;* from the medium on the next access and the lost bytes silently revert to
+;* their old content.
+;*
+;* Does nothing if nobody owns the buffer or if the owner is not dirty.
+;*
+;* INPUT:  R8: device handle
+;* OUTPUT: R8: unchanged device handle
+;*         R9: 0, if OK, otherwise error code
+;*****************************************************************************
+;
+FAT32$FLUSH_OWNER INCRB
+
+                MOVE    R8, R0                  ; R0: device handle
+                ADD     FAT32$DEV_BUFFERED_FDH, R8
+                MOVE    @R8, R8                 ; R8: owner of the buffer or 0
+                RSUB    FAT32$FLUSH, 1          ; R9: 0 or error code
+                MOVE    R0, R8                  ; restore the device handle
+
+                DECRB
+                RET
+;
+;*****************************************************************************
 ;* FAT32$FLUSH writes the 512-byte sector buffer to the physical medium
 ;*
 ;* Only flushes the buffer, if the FAT32$FDHF_DIRTY flag is set and clears the
@@ -2881,6 +2965,11 @@ FAT32$FLUSH     INCRB
 
                 ; Due the FAT32$DEV_BUFFERED_FDH system, there are situations
                 ; where FLUSH is called with R8 = 0. Do nothing in this case.
+                ; R9 needs to be set here, too: callers evaluate it as an error
+                ; code and would otherwise judge whatever they happened to pass
+                ; in R9. Since ownership of the buffer is explicitly released
+                ; in several places now, R8 = 0 is a regular situation.
+                XOR     R9, R9
                 CMP     0, R8
                 RBRA    _FAT32$FLUSH_0, Z
 
@@ -2899,6 +2988,19 @@ FAT32$FLUSH     INCRB
                 MOVE    @R0, R1
                 AND     FAT32$FDHF_DIRTY, R1
                 RBRA    _FAT32$FLUSH_R, Z       ; flag is not set: return
+
+                ; Only the handle that currently owns the 512-byte sector
+                ; buffer is allowed to write it back. A dirty handle that does
+                ; not own the buffer any more would otherwise flush the data of
+                ; somebody else into its own sector. In that situation the data
+                ; of this handle is already gone, so the only sane reaction is
+                ; to drop the stale dirty flag instead of corrupting the medium.
+                MOVE    R8, R4                  ; R4: FDH
+                ADD     FAT32$FDH_DEVICE, R4
+                MOVE    @R4, R4                 ; R4: device handle
+                ADD     FAT32$DEV_BUFFERED_FDH, R4
+                CMP     @R4, R8                 ; do we own the buffer?
+                RBRA    _FAT32$FLUSH_C, !Z      ; no: only clear the flag
 
                 ; write to physical medium
                 MOVE    R8, R2                  ; R2: FDH
@@ -2926,7 +3028,7 @@ FAT32$FLUSH     INCRB
                 RBRA    _FAT32$FLUSH_R, !Z
 
                 ; clear dirty flag after flushing the buffer
-                MOVE    FAT32$FDHF_DIRTY, R1    ; R1 = dirty flag
+_FAT32$FLUSH_C  MOVE    FAT32$FDHF_DIRTY, R1    ; R1 = dirty flag
                 NOT     R1, R1                  ; R1 = bitmask to clear flag
                 AND     R1, @R0                 ; clear dirty flag
 
@@ -2965,8 +3067,23 @@ FAT32$CLOSE     INCRB
                 CMP     0, R9
                 RBRA    _FAT32$CLOSE_R, !Z
 
+                ; The FDH is zeroed further below, so it must not stay
+                ; registered as the owner of the 512-byte sector buffer: a
+                ; later flush would read the dirty flag, cluster and sector
+                ; from a wiped structure. The device handle has to be taken out
+                ; of the FDH before that happens.
+                MOVE    R8, R1
+                ADD     FAT32$FDH_DEVICE, R1
+                MOVE    @R1, R1                 ; R1: device handle
+                CMP     0, R1                   ; plausible device handle?
+                RBRA    _FAT32$CLOSE_C, Z       ; no: nothing to release
+                ADD     FAT32$DEV_BUFFERED_FDH, R1
+                CMP     @R1, R8                 ; do we own the buffer?
+                RBRA    _FAT32$CLOSE_C, !Z      ; no: leave the owner alone
+                MOVE    0, @R1                  ; yes: release the ownership
+
                 ; clear the FDH
-                MOVE    R10, R0                 ; remember R10, leave unchgd
+_FAT32$CLOSE_C  MOVE    R10, R0                 ; remember R10, leave unchgd
 
                 MOVE    FAT32$FDH_STRUCT_SIZE, R9
                 XOR     R10, R10
