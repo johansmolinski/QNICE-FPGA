@@ -12,9 +12,11 @@
 ;; The calculation is done like this:
 ;;      0xFF00 (start of IO-page) minus sizeof(all variables here)
 ;;      0xFF00 minus 18 (0x12) - 1 - 1 - 1 = 0xFEEB
+;; Megamiga (fat32_write.asm): the device handle grew to 27 (0x1B) words:
+;;      0xFF00 minus 27 (0x1B) - 1 - 1 - 1 = 0xFEE2
 ;;=========================================================================================
 ;
-            .ORG    0xFEEB
+            .ORG    0xFEE2
 
 VAR$STACK_START         .BLOCK  0x0001                  ; Here comes the stack...
 ;

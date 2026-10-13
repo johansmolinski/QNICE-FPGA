@@ -397,6 +397,12 @@ _F32_MNT_RVID   MOVE    R0, R8
                 ADD     FAT32$DEV_BUFFERED_FDH, R10
                 XOR     @R10, @R10
 
+                ; the write layer (fat32_write.asm) determines its geometry
+                ; again on its first use: this may be another card
+                MOVE    R0, R10
+                ADD     FAT32$DEV_W_VALID, R10
+                MOVE    0, @R10
+
                 MOVE    0, R9                       ; no errors occured
 
 _F32_MNT_END    MOVE    @SP++, R12

@@ -295,6 +295,13 @@ FAT32$ERR_FILENOTFOUND  .EQU    0xEE20                  ; file not found
 FAT23$ERR_SEEKTOOLARGE  .EQU    0xEE21                  ; seek position > file size
 FAT32$ERR_CHAIN         .EQU    0xEE22                  ; cluster chain ends before the end of the file or contains a free/reserved cluster
 FAT32$ERR_MAPSIZE       .EQU    0xEE23                  ; FAT32$FILE_MAP: map buffer too small for all extents of the file
+; write layer (fat32_write.asm, Megamiga 2026-10)
+FAT32$ERR_DISKFULL      .EQU    0xEE24                  ; no free cluster left
+FAT32$ERR_EXISTS        .EQU    0xEE25                  ; an entry of that name exists already
+FAT32$ERR_NAME          .EQU    0xEE26                  ; the name is empty, too long or contains characters FAT does not allow
+FAT32$ERR_NOTEMPTY      .EQU    0xEE27                  ; the directory is not empty
+FAT32$ERR_DIRFULL       .EQU    0xEE28                  ; the directory has no room for more entries (65536 slots)
+FAT32$ERR_LOOP          .EQU    0xEE29                  ; rename: a directory cannot move into itself or below it
 
 ; FAT32 STATUS CODES
 
@@ -320,8 +327,18 @@ FAT32$DEV_RD_1STCLUS_HI .EQU    0x000E                  ; root directory first c
 FAT32$DEV_AD_1STCLUS_LO .EQU    0x000F                  ; currently active directory first cluster: low word
 FAT32$DEV_AD_1STCLUS_HI .EQU    0x0010                  ; currently active directory first cluster: high word
 FAT32$DEV_BUFFERED_FDH  .EQU    0x0011                  ; FDH which is responsible for the current 512 byte hardware buffer filling
+; write layer (fat32_write.asm): the geometry it needs, filled on the first write after a mount
+FAT32$DEV_W_VALID       .EQU    0x0012                  ; 0: the fields below are not filled yet (FAT32$MOUNT clears it)
+FAT32$DEV_FAT2_LO       .EQU    0x0013                  ; second FAT start address (LBA): low word
+FAT32$DEV_FAT2_HI       .EQU    0x0014                  ; second FAT start address (LBA): high word
+FAT32$DEV_MAXCLUS_LO    .EQU    0x0015                  ; highest data cluster number: low word
+FAT32$DEV_MAXCLUS_HI    .EQU    0x0016                  ; highest data cluster number: high word
+FAT32$DEV_FSINFO_LO     .EQU    0x0017                  ; FSInfo sector (LBA), 0 = none: low word
+FAT32$DEV_FSINFO_HI     .EQU    0x0018                  ; FSInfo sector (LBA): high word
+FAT32$DEV_HINT_LO       .EQU    0x0019                  ; where the search for a free cluster starts: low word
+FAT32$DEV_HINT_HI       .EQU    0x001A                  ; where the search for a free cluster starts: high word
 
-FAT32$DEV_STRUCT_SIZE   .EQU    0x0012                  ; size (words) of the mount data structure (device handle)
+FAT32$DEV_STRUCT_SIZE   .EQU    0x001B                  ; size (words) of the mount data structure (device handle)
 
 ; LAYOUT OF THE FILE HANDLE AND DIRECTORY HANDLE (FDH)
 
@@ -337,12 +354,17 @@ FAT32$FDH_ACCESS_HI     .EQU    0x0008                  ; only if FDH is a file:
 FAT32$FDH_START_CLUS_LO .EQU    0x0009                  ; only if FDH is a file: start of file: cluster (low word)
 FAT32$FDH_START_CLUS_HI .EQU    0x000A                  ; only if FDH is a file: start of file: cluster (high word)
 FAT32$FDH_FLAGS         .EQU    0x000B                  ; status flags
+; write layer (fat32_write.asm): where the directory entry of the file is (FAT32$W_FDH fills it)
+FAT32$FDH_EA_CL_LO      .EQU    0x000C                  ; entry address: cluster low word
+FAT32$FDH_EA_CL_HI      .EQU    0x000D                  ; entry address: cluster high word
+FAT32$FDH_EA_POS        .EQU    0x000E                  ; entry address: sector << 4 | slot
 
-FAT32$FDH_STRUCT_SIZE   .EQU    0x000C                  ; size of the directory handle structure
+FAT32$FDH_STRUCT_SIZE   .EQU    0x000F                  ; size of the directory handle structure
 
 ; Flags used by FAT32$FDH_FLAGS
 
 FAT32$FDHF_DIRTY        .EQU    0x0001                  ; bit 0: sector buffer is dirty due to a write access
+FAT32$FDHF_SIZECHG      .EQU    0x0002                  ; bit 1: size or first cluster changed (write layer)
 
 ; FILE ATTRIBUTES
 
