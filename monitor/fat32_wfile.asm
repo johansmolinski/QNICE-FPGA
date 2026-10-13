@@ -301,7 +301,8 @@ _F32W_AV_RET    DECRB
 ;* with the date and time of the last write (PB_DATE, PB_TIME)
 ;*
 ;* INPUT:  R8  file handle
-;*         R9  parameter block (PB_DATE, PB_TIME set; the rest is scratch)
+;*         R9  parameter block (PB_DATE, PB_TIME set - PB_DATE 0: the date
+;*             of the entry stays; the rest is scratch)
 ;* OUTPUT: R8  unchanged
 ;*         R9  0 if OK, otherwise an error code
 ;*         R10..R12 unchanged
@@ -327,8 +328,12 @@ _F32W_SYNC    INCRB
                 ADD     FAT32$PB_FLAGS, R4
                 MOVE    FAT32$WSF_SIZE, @R4
                 OR      FAT32$WSF_CLUS, @R4
+                MOVE    R1, R5                      ; a date (PB_DATE not 0):
+                ADD     FAT32$PB_DATE, R5           ; the last write; else the
+                CMP     0, @R5                      ; old date stays
+                RBRA    _F32W_SY_ND, Z
                 OR      FAT32$WSF_TIME, @R4
-                MOVE    R0, R5
+_F32W_SY_ND     MOVE    R0, R5
                 ADD     FAT32$FDH_START_CLUS_LO, R5
                 MOVE    R1, R4
                 ADD     FAT32$PB_CL_LO, R4

@@ -2291,6 +2291,25 @@ _F32_DF_NXSG5   MOVE    R6, R7                  ; R7 = dir. entry name
                 MOVE    R12, R7
                 ADD     FAT32$FDH_FLAGS, R7
                 MOVE    0, @R7                  ; no dirty flag
+
+                ; where its directory entry is (for the write layer,
+                ; fat32_write.asm): the directory handle points behind its
+                ; short name slot, DIR_LIST moved the index on by 32
+                MOVE    R5, R8
+                ADD     FAT32$FDH_CLUSTER_LO, R8
+                MOVE    R12, R7
+                ADD     FAT32$FDH_EA_CL_LO, R7
+                MOVE    @R8++, @R7++            ; cluster (CLUSTER_HI, then
+                MOVE    @R8++, @R7++            ; SECTOR and INDEX follow)
+                MOVE    @R8++, R9               ; sector << 4 | slot
+                AND     0xFFFD, SR
+                SHL     4, R9
+                MOVE    @R8, R10
+                SUB     32, R10
+                SHR     5, R10
+                AND     0x000F, R10
+                OR      R10, R9
+                MOVE    R9, @R7
                 RBRA    _F32_DF_SUCCESS, 1      ; return a success
 
                 ; change the directory by setting AD within the device handle
