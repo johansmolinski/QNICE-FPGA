@@ -1531,6 +1531,7 @@ int main(int argc, char **argv) {
         \"qnice\" without arguments will start an interactive session\n\
         \"qnice -h\" will print this help text\n\
         \"qnice -a <disk_image>\" will attach an SD-card image file\n\
+        \"qnice -a1 <disk_image>\" attaches one to the second SD slot\n\
         \"qnice -a <disk_image> <file.bin> \" attaches an images and runs a file\n\
         \"qnice <file.bin>\" will run in batch mode and print statistics\n\
         \"qnice [-a <disk_image>] -b <addr> <f.out> [<f2.out> ...]\" headless batch\n\
@@ -1548,6 +1549,21 @@ int main(int argc, char **argv) {
       }
 
       sd_attach(*argv++);
+      if (*argv && !strcmp(*argv, "-a1")) { /* ...and one for the second slot (two SD slots) */
+        if (!*++argv) {
+          printf("Expected a filename after -a1 but none found.\n");
+          return -1;
+        }
+        sd_attach_slot(1, *argv++);
+      }
+    }
+    else if (!strcmp(*argv, "-a1")) { /* only the second slot */
+      if (!*++argv) {
+        printf("Expected a filename after -a1 but none found.\n");
+        return -1;
+      }
+
+      sd_attach_slot(1, *argv++);
     }
 #endif
   }
