@@ -238,7 +238,7 @@ def main():
     for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN"):
         size, ch = files[n]
         assert size == sizes[n], (n, size)
-        info[n] = (size, len(extents(ch)))
+        info[n] = (size, len(extents(ch)), len(ch))
         print(f"{n}: size {size}, clusters {len(ch)}, extents {len(extents(ch))}")
 
     ops = []   # (op, a, b, c, d)
@@ -248,15 +248,16 @@ def main():
 
     names = []
     for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN"):
-        size, next_ = info[n]
+        size, next_, ncl = info[n]
+        hooks = (ncl - 2) // 256 + 1 if ncl >= 2 else 0   # FAT32$FILE_MAP_CB: remaining 256k, 0 included
         names.append(n)
         ops.append((1, len(names) - 1, 0, 0, 0))                 # open
         modes = [False] if seek_only else [False, True]
         if not seek_only:
-            ops.append((4, 1 + 4 * 256, 0, next_, 0))            # map
+            ops.append((4, 1 + 4 * 256, 0, next_, hooks))        # map (d: hook calls)
             if next_ >= 2:
-                ops.append((4, 1 + 4 * (next_ - 1), MAPSIZE, next_, 0))
-                ops.append((4, 1 + 4 * 256, 0, next_, 0))
+                ops.append((4, 1 + 4 * (next_ - 1), MAPSIZE, next_, hooks))
+                ops.append((4, 1 + 4 * 256, 0, next_, hooks))
         for mapped in modes:
             pts = {0, size}
             for k in range(0, size // cbytes + 2):
@@ -295,7 +296,7 @@ def main():
             seek(0, 16)                          # backwards from scratch again
             seek(10 * cbytes + 5, 0, 0xEE22)     # forward from the current cluster
         if not seek_only:
-            ops.append((4, 1 + 4 * 256, 0xEE22, 0xFFFF, 0))
+            ops.append((4, 1 + 4 * 256, 0xEE22, 0xFFFF, 0xFFFF))
         ops.append((6, len(names) - 1, 0, 0, 0))
 
     with open(os.path.join(outdir, "tests.inc"), "w") as f:

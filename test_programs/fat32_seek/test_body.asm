@@ -168,11 +168,32 @@ T_SEEK_OK       CMP     0, R9
                 RBRA    T_LOOP, 1
 
                 ; ---- MAP -------------------------------------------------
-T_MAP           MOVE    T_FDH, R8
+T_MAP           MOVE    T_HOOKN, R8             ; with the progress hook,
+                MOVE    0, @R8                  ; which counts its calls
+                MOVE    T_FDH, R8
                 MOVE    T_MAPBUF, R9
                 MOVE    R2, R10
-                RSUB    FAT32$FILE_MAP, 1
-                CMP     R3, R9
+                MOVE    T_HOOK, R11
+                RSUB    FAT32$FILE_MAP_CB, 1
+                CMP     T_HOOK, R11             ; (R11 preserved)
+                RBRA    T_MAP_H, Z
+                MOVE    R11, R8
+                MOVE    T_HOOK, R9
+                RSUB    T_FAIL, 1
+                ADD     1, R6
+                RBRA    T_LOOP, 1
+T_MAP_H         CMP     0xFFFF, R5              ; d: the hook calls expected
+                RBRA    T_MAP_E, Z
+                MOVE    T_HOOKN, R11
+                CMP     @R11, R5
+                RBRA    T_MAP_E, Z
+                MOVE    R9, @--SP
+                MOVE    @R11, R8
+                MOVE    R5, R9
+                RSUB    T_FAIL, 1
+                MOVE    @SP++, R9
+                ADD     1, R6
+T_MAP_E         CMP     R3, R9
                 RBRA    T_MAP_N, Z
                 MOVE    R9, R8
                 MOVE    R3, R9
@@ -194,6 +215,14 @@ T_MAP_P         MOVE    T_S_EXT, R8             ; print the extent count
                 RSUB    IO$PUT_W_HEX, 1
                 RSUB    IO$PUT_CRLF, 1
                 RBRA    T_LOOP, 1
+
+; T_HOOK: the progress hook of FAT32$FILE_MAP_CB: counts its calls, keeps
+; every register (and the flags do not matter to the caller)
+T_HOOK          MOVE    R8, @--SP
+                MOVE    T_HOOKN, R8
+                ADD     1, @R8
+                MOVE    @SP++, R8
+                RET
 
                 ; ---- WRITE -----------------------------------------------
 T_WRITE         MOVE    1, R11                  ; inverted pattern

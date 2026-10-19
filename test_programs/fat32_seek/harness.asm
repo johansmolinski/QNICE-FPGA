@@ -26,6 +26,7 @@ T_RECNO         .BLOCK  1
 T_NFAIL         .BLOCK  1
 T_FAILPOS       .BLOCK  2
 T_MAPBUF        .BLOCK  1025
+T_HOOKN         .BLOCK  1
 T_SAVE_R0       .BLOCK  1
 T_SAVE_R7       .BLOCK  1
 T_SAVE_CS       .BLOCK  1

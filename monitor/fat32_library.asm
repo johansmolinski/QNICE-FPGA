@@ -1321,7 +1321,25 @@ FAT32$FILE_SEEK_MAP RSUB _F32_SEEK, 1
 ;*             small; undefined in case of other errors)
 ;*****************************************************************************
 ;
-FAT32$FILE_MAP  MOVE    R11, @--SP
+FAT32$FILE_MAP  MOVE    R11, @--SP                  ; no progress hook
+                XOR     R11, R11
+                RSUB    FAT32$FILE_MAP_CB, 1
+                MOVE    @SP++, R11
+                RET
+;
+;*****************************************************************************
+;* FAT32$FILE_MAP_CB is FAT32$FILE_MAP with a progress hook
+;*
+;* Walking the cluster chain of a large file takes seconds (one FAT sector
+;* per 128 clusters). R11 = the address of a subroutine (0 = none) that is
+;* called after every 256 clusters walked; it must preserve all registers
+;* (R0..R7 of the caller's register bank included: INCRB). It can count the
+;* calls against ceil(size / cluster size) / 256 for a progress bar.
+;*
+;* INPUT/OUTPUT: as FAT32$FILE_MAP, plus R11 (preserved): the hook
+;*****************************************************************************
+;
+FAT32$FILE_MAP_CB MOVE  R11, @--SP                  ; (SP+7 in the loop below)
                 MOVE    R12, @--SP
                 SUB     6, SP                       ; SP+0..1: FAT sector cache
                                                     ; SP+2..5: current extent
@@ -1432,6 +1450,14 @@ _F32_FM_NEXT    MOVE    R10, R6                     ; current = next
                 MOVE    R11, R7
                 SUB     1, R4                       ; one cluster less to go
                 SUBC    0, R5
+                MOVE    R4, R8                      ; every 256 clusters: the
+                AND     0x00FF, R8                  ; progress hook, if there
+                RBRA    _F32_FM_LOOP, !Z            ; is one (R11 of the
+                MOVE    SP, R8                      ; caller, saved at SP+7)
+                ADD     7, R8
+                MOVE    @R8, R8
+                RBRA    _F32_FM_LOOP, Z
+                ASUB    R8, 1
                 RBRA    _F32_FM_LOOP, 1
 
 _F32_FM_LAST    RSUB    _F32_FM_EMIT, 1             ; emit the last extent
