@@ -58,6 +58,7 @@ FAT32$FE_DC_EXT_MASK    .EQU    0x0010                  ; FAT32$FE_DISPLAYCASE: 
 FAT32$FE_SPECIAL_CHAR   .EQU    0x0005                  ; if the first char is this, then replace by E5
 FAT32$FE_PADDING        .EQU    0x0020                  ; padding used in short file names
 FAT32$FE_LE_FINAL       .EQU    0x0040                  ; flag signalling last entry of a long filename table
+FAT32$INT_LONG_MAX      .EQU    20                      ; a long name has at most 20 records (255 chars)
 FAT32$FE_LE_CHKSUM      .EQU    0x000D                  ; long filename checksum
 FAT32$FE_LE_C1_5        .EQU    0x0001                  ; long filename: characters 1 .. 5
 FAT32$FE_LE_C6_11       .EQU    0x000E                  ; long filename: characters 6 .. 11
@@ -614,6 +615,8 @@ _F32_DLST_C4    MOVE    R2, R5                      ; dir. entry struct.
                 MOVE    @R5, R7
                 NOT     R12, R12                    ; remove flag
                 AND     R12, R7                     ; R7 = # long name records
+                CMP     R7, FAT32$INT_LONG_MAX      ; more than a name can
+                RBRA    _F32_DLST_DS, N             ; have: corrupt, skip
                 MOVE    R7, R6                      ; R6 = current record
 
                 ; long name: check, if the record counter (byte #0) equals the
@@ -627,14 +630,24 @@ _F32_DLST_LN1   MOVE    R0, R8
                 AND     R12, R10                    ; remove start flag
                 CMP     R10, R6                     ; record cntr = cur. rec.?
                 RBRA    _F32_DLST_LN1B, Z           ; yes: go on
-                RBRA    _F32_DLST_DS, !Z            ; no: skip until short nm.
+                RBRA    _F32_DLST_LNX, !Z           ; no: skip until short nm.
 _F32_DLST_LN1B  ADD     FAT32$FE_LE_CHKSUM, R9      ; read checksum
                 RSUB    FAT32$READ_B, 1
                 CMP     R6, R7                      ; first checksum?
                 RBRA    _F32_DLST_LN2, !Z           ; no
                 MOVE    R10, R11                    ; R11: checksum
 _F32_DLST_LN2   CMP     R10, R11                    ; checksum OK?
-                RBRA    _F32_DLST_DS, !Z            ; no: skip until short nm.
+                RBRA    _F32_DLST_LN2B, Z           ; yes: go on
+
+                ; broken long name (a record with a wrong number or checksum):
+                ; the records R7 .. R6 + 1 are on the stack already, give their
+                ; 13 words each back before skipping until the short name
+_F32_DLST_LNX   CMP     R6, R7
+                RBRA    _F32_DLST_DS, Z
+                ADD     13, SP
+                ADD     1, R6
+                RBRA    _F32_DLST_LNX, 1
+_F32_DLST_LN2B
 
                 ; long name: retrieve the long file name that is stored at
                 ; various offsets within the 32byte record and store it on the
