@@ -6,12 +6,13 @@ usage: gen.py <outdir> <sectors_per_cluster> [--seek-only] [--seed N]
 Files on the image (pattern: the file is a sequence of 32-bit big-endian
 counters, i.e. byte p = ((p >> 2) >> (8 * (3 - p % 4))) & 0xFF):
   T.BIN  large, contiguous
+  B.BIN  more than 65536 clusters, contiguous (512 B and 4 KB clusters only)
   F.BIN  fragmented (gaps created by deleting every other small file)
   S.BIN  1000 bytes (size not a multiple of 512)
   E.BIN  exactly 3 clusters
   Z.BIN  0 bytes
 """
-import os, random, shutil, struct, subprocess, sys
+import array, os, random, shutil, struct, subprocess, sys
 
 PART_LBA = 2048
 EOF_ERR, TOOLARGE, MAPSIZE = 0xEEEE, 0xEE21, 0xEE23
@@ -19,7 +20,10 @@ EOF_ERR, TOOLARGE, MAPSIZE = 0xEEEE, 0xEE21, 0xEE23
 
 def pattern(size):
     n = (size + 3) // 4
-    return b"".join(struct.pack(">I", i) for i in range(n))[:size]
+    a = array.array("I", range(n))           # 32-bit big-endian counters, fast for large files
+    if sys.byteorder == "little":
+        a.byteswap()
+    return a.tobytes()[:size]
 
 
 def run(*cmd):
@@ -199,11 +203,17 @@ def main():
     cbytes = spc * 512
     # FAT32 needs >= 65525 clusters; give it some headroom
     mb = max(64, (cbytes * 70000) // (1024 * 1024) + 8)
+    # M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-02): B.BIN, more than 65536 clusters (cluster
+    # indices and extent lengths above 16 bits; a 2 GB disk image with 4 KB clusters failed)
+    big = 70000 * cbytes + 777 if spc <= 8 else 0
+    mb += (big + 1024 * 1024 - 1) // (1024 * 1024) + 8
     make_image(img, spc, mb)
 
     sizes = {"T.BIN": 6 * 1024 * 1024 if spc < 64 else 24 * 1024 * 1024,
              "S.BIN": 1000, "E.BIN": 3 * cbytes, "Z.BIN": 0}
-    for n in ("S.BIN", "E.BIN", "Z.BIN", "T.BIN"):
+    if big:
+        sizes["B.BIN"] = big
+    for n in ("S.BIN", "E.BIN", "Z.BIN", "T.BIN") + (("B.BIN",) if big else ()):
         put(img, tmp, n, pattern(sizes[n]))
     # fragmentation: fill with 1-cluster files, delete every other one, then
     # write F.BIN, which has to use the holes
@@ -235,7 +245,7 @@ def main():
     files["D.BIN"] = good["D.BIN"]
     assert cb == cbytes
     info = {}
-    for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN"):
+    for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN") + (("B.BIN",) if big else ()):
         size, ch = files[n]
         assert size == sizes[n], (n, size)
         info[n] = (size, len(extents(ch)), len(ch))
@@ -247,7 +257,7 @@ def main():
         ops.append((3 if mapped else 2, pos & 0xFFFF, pos >> 16, length, expect))
 
     names = []
-    for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN"):
+    for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN") + (("B.BIN",) if big else ()):
         size, next_, ncl = info[n]
         hooks = (ncl - 2) // 256 + 1 if ncl >= 2 else 0   # FAT32$FILE_MAP_CB: remaining 256k, 0 included
         names.append(n)
