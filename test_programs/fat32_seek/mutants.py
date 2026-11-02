@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Mutation tests: every mutant of the seek/map code must make the suite fail.
 (An end-of-file index mutant was found to be equivalent through the public
-interface and is therefore not part of this list.)
+interface and is therefore not part of this list. So is skipping the fast map
+path's check that the FAT sector of the current cluster is in the buffer
+(M2M-UPSTREAM fat32-fastmap): the path accepts only entries equal to
+"current + 1", which a wrong sector does not hold. flush_r9 survives on
+78aeaac as well.)
 usage: mutants.py <monitor dir> <work dir>"""
 import os, shutil, subprocess, sys
 mon, work = sys.argv[1], sys.argv[2]
@@ -20,6 +24,11 @@ M = {
  "walk_from_cur":  ("                SUBC    R9, R7\n                RBRA    _F32_CA_STEP, !C",
                     "                SUBC    R9, R7\n                ADD     1, R6\n                RBRA    _F32_CA_STEP, !C"),
  "flush_r9":       ("_FAT32$FLUSH_0  XOR     R9, R9", "_FAT32$FLUSH_0  NOP"),
+ # M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-02): the fast path of FAT32$FILE_MAP
+ "fast_no_lo":     ("                ADD     1, R8\n                CMP     R8, R7\n                RBRA    _F32_FMR_END, !Z",
+                    "                ADD     1, R8\n                CMP     R8, R7"),
+ "fast_count":     ("                ADD     4, R4\n                ADD     1, R6",
+                    "                ADD     4, R4\n                ADD     2, R6"),
 }
 ok = True
 for name, (old, new) in M.items():

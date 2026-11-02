@@ -1413,8 +1413,70 @@ FAT32$FILE_MAP_CB MOVE  R11, @--SP                  ; (SP+7 in the loop below)
 _F32_FM_LOOP    MOVE    R4, R8
                 OR      R5, R8
                 RBRA    _F32_FM_LAST, Z             ; no more clusters
-
-                MOVE    R0, R8
+                ; M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-02): the fast
+                ; path. While the FAT sector of the current cluster is the
+                ; one in the buffer, _F32_FM_RUN checks its entries for
+                ; "next = current + 1" in a tight loop (the device's byte
+                ; read called directly, not READ_DW/READ_W/READ_B/CALL_DEV:
+                ; about ten times fewer instructions per cluster). It stops
+                ; at the end of the sector, at the end of the file or at the
+                ; first entry that does not continue the extent; that entry
+                ; then takes the general path below (new extent, errors).
+                MOVE    R6, R8                      ; R9|R8: LBA of the FAT
+                SHR     7, R8                       ; sector of the current
+                AND     0x01FF, R8                  ; cluster (as in
+                MOVE    R7, R9                      ; _F32_FATNEXT)
+                SHL     9, R9
+                AND     0xFE00, R9
+                OR      R9, R8
+                MOVE    R7, R9
+                SHR     7, R9
+                AND     0x01FF, R9
+                MOVE    R0, R10
+                ADD     FAT32$FDH_DEVICE, R10
+                MOVE    @R10, R12                   ; R12: device handle
+                MOVE    R12, R10
+                ADD     FAT32$DEV_FAT_LO, R10
+                ADD     @R10++, R8                  ; DEV_FAT_HI follows LO
+                ADDC    @R10, R9
+                MOVE    SP, R10                     ; in the buffer (the
+                CMP     @R10++, R8                  ; cache at SP+0..1)?
+                RBRA    _F32_FM_GEN, !Z
+                CMP     @R10, R9
+                RBRA    _F32_FM_GEN, !Z
+                ADD     FAT32$DEV_BYTE_READ, R12
+                MOVE    @R12, R12                   ; R12: byte read function
+                MOVE    R6, R8                      ; R9|R8: current cluster
+                MOVE    R7, R9
+                MOVE    R4, R10                     ; R11|R10: remaining
+                MOVE    R5, R11
+                RSUB    _F32_FM_RUN, 1              ; R12: clusters added
+                CMP     0, R12
+                RBRA    _F32_FM_GEN, Z              ; none: the general path
+                MOVE    R8, R6                      ; the new current cluster
+                MOVE    R9, R7
+                MOVE    R4, R8                      ; R8, R9: 256-cluster
+                SUB     1, R8                       ; marks of the first and
+                AND     0xFF00, R8                  ; the last remaining
+                MOVE    R10, R4                     ; count of the run (at
+                MOVE    R11, R5                     ; most 128 clusters, so
+                MOVE    R10, R9                     ; at most one mark)
+                SUB     1, R9
+                AND     0xFF00, R9
+                MOVE    SP, R10                     ; extend the extent
+                ADD     4, R10
+                ADD     R12, @R10++
+                ADDC    0, @R10
+                CMP     R8, R9                      ; a mark passed: the
+                RBRA    _F32_FM_LOOP, Z             ; progress hook, if there
+                MOVE    SP, R8                      ; is one (as below)
+                ADD     7, R8
+                MOVE    @R8, R8
+                RBRA    _F32_FM_LOOP, Z
+                ASUB    R8, 1
+                RBRA    _F32_FM_LOOP, 1
+                ; the general path: one cluster through _F32_FATNEXT
+_F32_FM_GEN     MOVE    R0, R8
                 ADD     FAT32$FDH_DEVICE, R8
                 MOVE    @R8, R8                     ; R8: device handle
                 MOVE    R6, R9
@@ -1504,6 +1566,74 @@ _F32_FM_EMIT2   SUB     1, R2
                 MOVE    @R9++, @R1++
                 MOVE    @R9++, @R1++
                 MOVE    @R9, @R1++
+                RET
+
+                ; M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-02): helper of
+                ; FAT32$FILE_MAP, the fast path. The FAT sector of the
+                ; current cluster is in the device's buffer. Follows the
+                ; entries of that sector while each one is "current + 1".
+                ; INPUT:  R9|R8 current cluster, R11|R10 remaining clusters
+                ;         (not 0), R12 the device's byte read function
+                ;         (R8 = offset 0..511 in, R8 = the byte out)
+                ; OUTPUT: R9|R8 the new current cluster, R11|R10 the new
+                ;         remaining count, R12 the clusters added (0..128)
+_F32_FM_RUN     INCRB
+                MOVE    R8, R0                      ; R1|R0: current cluster
+                MOVE    R9, R1
+                MOVE    R10, R2                     ; R3|R2: remaining
+                MOVE    R11, R3
+                MOVE    R12, R5                     ; R5: byte read function
+                MOVE    R0, R4                      ; R4: offset of the entry
+                AND     0x007F, R4                  ; = (cluster % 128) * 4
+                SHL     2, R4
+                AND     0x01FC, R4
+                XOR     R6, R6                      ; R6: clusters added
+_F32_FMR_LOOP   MOVE    R2, R7                      ; the end of the file
+                OR      R3, R7
+                RBRA    _F32_FMR_END, Z
+                CMP     0x0200, R4                  ; the end of the sector
+                RBRA    _F32_FMR_END, Z
+                MOVE    R4, R8                      ; R7: entry bits 15..0
+                ASUB    R5, 1
+                MOVE    R8, R7
+                MOVE    R4, R8
+                ADD     1, R8
+                ASUB    R5, 1
+                SWAP    R8, R8
+                OR      R8, R7
+                MOVE    R0, R8                      ; = (current + 1) LO?
+                ADD     1, R8
+                CMP     R8, R7
+                RBRA    _F32_FMR_END, !Z
+                MOVE    R4, R8                      ; R7: entry bits 27..16
+                ADD     2, R8
+                ASUB    R5, 1
+                MOVE    R8, R7
+                MOVE    R4, R8
+                ADD     3, R8
+                ASUB    R5, 1
+                AND     0x000F, R8
+                SWAP    R8, R8
+                OR      R8, R7
+                MOVE    R1, R8                      ; = (current + 1) HI?
+                CMP     0xFFFF, R0
+                RBRA    _F32_FMR_NC, !Z
+                ADD     1, R8
+_F32_FMR_NC     CMP     R8, R7
+                RBRA    _F32_FMR_END, !Z
+                ADD     1, R0                       ; continues the extent
+                ADDC    0, R1
+                SUB     1, R2
+                SUBC    0, R3
+                ADD     4, R4
+                ADD     1, R6
+                RBRA    _F32_FMR_LOOP, 1
+_F32_FMR_END    MOVE    R0, R8
+                MOVE    R1, R9
+                MOVE    R2, R10
+                MOVE    R3, R11
+                MOVE    R6, R12
+                DECRB
                 RET
 ;
 ;*****************************************************************************
