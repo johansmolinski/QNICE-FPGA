@@ -50,7 +50,7 @@ run_case() {
 MODE=${1:-all}
 case $MODE in
 all)
-    for spc in 1 8 64; do
+    for spc in ${SPCS:-1 8 64}; do
         C=$W/case$spc
         [ -f "$C/sd.img" ] || python3 "$H/gen.py" "$C" $spc > "$C.gen.log"
         echo "cluster $((spc * 512)) bytes: $(run_case "$ROOT/monitor" "$C" new)"

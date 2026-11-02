@@ -205,7 +205,8 @@ def main():
     mb = max(64, (cbytes * 70000) // (1024 * 1024) + 8)
     # M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-02): B.BIN, more than 65536 clusters (cluster
     # indices and extent lengths above 16 bits; a 2 GB disk image with 4 KB clusters failed)
-    big = 70000 * cbytes + 777 if spc <= 8 else 0
+    # (BIG_BYTES: another size, e.g. 1981808640, a real 2 GB SxSI image)
+    big = int(os.environ.get("BIG_BYTES", 70000 * cbytes + 777)) if spc <= 8 else 0
     mb += (big + 1024 * 1024 - 1) // (1024 * 1024) + 8
     make_image(img, spc, mb)
 
@@ -280,6 +281,9 @@ def main():
             pts = [p for p in pts if 0 <= p <= size]
             if size > 1_000_000:                     # do not test every cluster of T.BIN
                 pts = sorted(rnd.sample(sorted(pts), min(len(pts), 150)) + [0, size, size - 1])
+                # and every 65536-cluster crossing (16-bit carries in cluster indices)
+                pts = sorted(set(pts) | {m * 65536 * cbytes + d for m in range(1, size // (65536 * cbytes) + 1)
+                                         for d in (-1, 0, 1) if 0 <= m * 65536 * cbytes + d <= size})
             order = list(pts)
             rnd.shuffle(order)                       # random forward/backward jumps
             order += sorted(pts)[:30]                # and ascending runs (walk from current)
