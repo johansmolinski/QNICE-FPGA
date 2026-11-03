@@ -8,6 +8,8 @@ counters, i.e. byte p = ((p >> 2) >> (8 * (3 - p % 4))) & 0xFF):
   T.BIN  large, contiguous
   B.BIN  more than 65536 clusters, contiguous (512 B and 4 KB clusters only)
   F.BIN  fragmented (gaps created by deleting every other small file)
+  J.BIN  with B.BIN: a chain that jumps from cluster c to c + 1 + 65536 (an entry
+         equal to "c + 1" in its low 16 bits only)
   S.BIN  1000 bytes (size not a multiple of 512)
   E.BIN  exactly 3 clusters
   Z.BIN  0 bytes
@@ -94,10 +96,12 @@ def fat_info(img):
     return cbytes, files
 
 
-def fragment(img, name, rnd):
+def fragment(img, name, rnd, place=None):
     """Move the clusters of a file to scattered free clusters: runs of 1-3
     clusters in random order (also backwards), updating both FATs and the
-    directory entry. Returns the new cluster list."""
+    directory entry. place(get, n, end): another layout, the list of n free
+    clusters below end (the first cluster number past the volume). Returns
+    the new cluster list."""
     with open(img, "r+b") as f:
         f.seek(PART_LBA * 512)
         bs = f.read(512)
@@ -134,6 +138,8 @@ def fragment(img, name, rnd):
         n = len(old_chain)
         # free clusters far away from the file, in scattered runs
         maxc = (fatsz * bps) // 4
+        totsec = struct.unpack_from("<I", bs, 32)[0]
+        end = (totsec - rsvd - nfats * fatsz) // spc + 2
         free = [c for c in range(max(old_chain) + 50, min(maxc, max(old_chain) + 50 + 40 * n)) if get(c) == 0]
         runs, i = [], 0
         while sum(len(r) for r in runs) < n:
@@ -142,6 +148,8 @@ def fragment(img, name, rnd):
             i += ln + rnd.choice((1, 2, 5, 17))
         rnd.shuffle(runs)
         new_chain = [c for r in runs for c in r][:n]
+        if place:
+            new_chain = place(get, n, end)
         data = []
         for c in old_chain:
             f.seek(data_off + (c - 2) * cb)
@@ -231,6 +239,17 @@ def main():
     put(img, tmp, "C.BIN", pattern(sizes["C.BIN"]))
     put(img, tmp, "D.BIN", pattern(sizes["D.BIN"]))
     fragment(img, "F.BIN", rnd)
+    if big:
+        # M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-03): the high word of an entry matters
+        def jump(get, n, end):
+            for a in range(2, end - 65536 - n):
+                ch = [a, a + 1] + [a + 2 + 65536 + i for i in range(n - 2)]
+                if all(get(c) == 0 for c in ch):
+                    return ch
+            raise SystemExit("no room for J.BIN")
+        sizes["J.BIN"] = 5 * cbytes - 100
+        put(img, tmp, "J.BIN", pattern(sizes["J.BIN"]))
+        fragment(img, "J.BIN", rnd, jump)
     part = os.path.join(tmp, "part.img")                               # must be a clean FS
     run("dd", f"if={img}", f"of={part}", "bs=1M", f"skip={PART_LBA * 512}", "iflag=skip_bytes", "conv=sparse")
     r = subprocess.run([shutil.which("fsck.vfat") or "/usr/sbin/fsck.vfat", "-n", part], capture_output=True, text=True)
@@ -246,7 +265,7 @@ def main():
     files["D.BIN"] = good["D.BIN"]
     assert cb == cbytes
     info = {}
-    for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN") + (("B.BIN",) if big else ()):
+    for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN") + (("B.BIN", "J.BIN") if big else ()):
         size, ch = files[n]
         assert size == sizes[n], (n, size)
         info[n] = (size, len(extents(ch)), len(ch))
@@ -258,7 +277,7 @@ def main():
         ops.append((3 if mapped else 2, pos & 0xFFFF, pos >> 16, length, expect))
 
     names = []
-    for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN") + (("B.BIN",) if big else ()):
+    for n in ("T.BIN", "F.BIN", "S.BIN", "E.BIN", "Z.BIN") + (("B.BIN", "J.BIN") if big else ()):
         size, next_, ncl = info[n]
         hooks = (ncl - 2) // 256 + 1 if ncl >= 2 else 0   # FAT32$FILE_MAP_CB: remaining 256k, 0 included
         names.append(n)

@@ -38,7 +38,7 @@ run_case() {
         # a library without extent maps: stubs, never called by --seek-only tables
         printf 'FAT32$FILE_MAP  HALT\nFAT32$FILE_SEEK_MAP HALT\n' >> "$B/fat32_library.asm"
     fi
-    (cd "$B" && cc -xc -E harness.asm 2>cpp.err | sed '/^#.*/d' > __t.asm &&
+    (cd "$B" && cc -xc -E $T_CPP harness.asm 2>cpp.err | sed '/^#.*/d' > __t.asm &&
         "$W/qasm" __t.asm test.out test.lis > qasm.log 2>&1) || { tail -20 "$B/qasm.log"; return 1; }
     cp --sparse=always "$CASE/sd.img" "$B/sd.img"
     (cd "$B" && timeout ${TMO:-3000} "$W/emu/qnice" -a sd.img test.out < /dev/null > emu.log 2>&1) || true
@@ -54,6 +54,7 @@ all)
         C=$W/case$spc
         [ -f "$C/sd.img" ] || python3 "$H/gen.py" "$C" $spc > "$C.gen.log"
         echo "cluster $((spc * 512)) bytes: $(run_case "$ROOT/monitor" "$C" new)"
+        echo "cluster $((spc * 512)) bytes, no direct reads: $(T_CPP=-DT_NODIRECT run_case "$ROOT/monitor" "$C" nodirect)"
     done ;;
 --compare)
     REV=${2:?revision}

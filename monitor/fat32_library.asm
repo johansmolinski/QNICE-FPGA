@@ -121,6 +121,12 @@ FAT32$MOUNT_SD  INCRB
                 ; call master mount function
                 RSUB    FAT32$MOUNT, 1
 
+                ; M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-03): the buffer
+                ; of QNICE's SD controller can be read directly
+                MOVE    R8, R0
+                ADD     FAT32$DEV_DIRECT, R0
+                MOVE    1, @R0
+
                 DECRB
                 RET
 ;
@@ -401,6 +407,13 @@ _F32_MNT_RVID   MOVE    R0, R8
                 ; again on its first use: this may be another card
                 MOVE    R0, R10
                 ADD     FAT32$DEV_W_VALID, R10
+                MOVE    0, @R10
+
+                ; M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-03): no direct
+                ; buffer reads unless the caller knows the device allows them
+                ; (FAT32$MOUNT_SD sets it after the mount)
+                MOVE    R0, R10
+                ADD     FAT32$DEV_DIRECT, R10
                 MOVE    0, @R10
 
                 MOVE    0, R9                       ; no errors occured
@@ -1444,8 +1457,6 @@ _F32_FM_LOOP    MOVE    R4, R8
                 RBRA    _F32_FM_GEN, !Z
                 CMP     @R10, R9
                 RBRA    _F32_FM_GEN, !Z
-                ADD     FAT32$DEV_BYTE_READ, R12
-                MOVE    @R12, R12                   ; R12: byte read function
                 MOVE    R6, R8                      ; R9|R8: current cluster
                 MOVE    R7, R9
                 MOVE    R4, R10                     ; R11|R10: remaining
@@ -1572,9 +1583,13 @@ _F32_FM_EMIT2   SUB     1, R2
                 ; FAT32$FILE_MAP, the fast path. The FAT sector of the
                 ; current cluster is in the device's buffer. Follows the
                 ; entries of that sector while each one is "current + 1".
+                ; A device with FAT32$DEV_DIRECT = 1 (QNICE's SD controller)
+                ; is read through IO$SD_DATA_POS / IO$SD_DATA after one call
+                ; of its byte read (which selects the controller, e.g. the
+                ; card slot on the MEGA65): about three times fewer
+                ; instructions per entry than a call per byte.
                 ; INPUT:  R9|R8 current cluster, R11|R10 remaining clusters
-                ;         (not 0), R12 the device's byte read function
-                ;         (R8 = offset 0..511 in, R8 = the byte out)
+                ;         (not 0), R12 the device handle
                 ; OUTPUT: R9|R8 the new current cluster, R11|R10 the new
                 ;         remaining count, R12 the clusters added (0..128)
 _F32_FM_RUN     INCRB
@@ -1582,12 +1597,17 @@ _F32_FM_RUN     INCRB
                 MOVE    R9, R1
                 MOVE    R10, R2                     ; R3|R2: remaining
                 MOVE    R11, R3
-                MOVE    R12, R5                     ; R5: byte read function
+                MOVE    R12, R5
+                ADD     FAT32$DEV_BYTE_READ, R5
+                MOVE    @R5, R5                     ; R5: byte read function
                 MOVE    R0, R4                      ; R4: offset of the entry
                 AND     0x007F, R4                  ; = (cluster % 128) * 4
                 SHL     2, R4
                 AND     0x01FC, R4
                 XOR     R6, R6                      ; R6: clusters added
+                ADD     FAT32$DEV_DIRECT, R12
+                CMP     0, @R12
+                RBRA    _F32_FMR_DIRECT, !Z
 _F32_FMR_LOOP   MOVE    R2, R7                      ; the end of the file
                 OR      R3, R7
                 RBRA    _F32_FMR_END, Z
@@ -1635,6 +1655,62 @@ _F32_FMR_END    MOVE    R0, R8
                 MOVE    R6, R12
                 DECRB
                 RET
+
+                ; the direct reads: R7 = the entries to check = the entries
+                ; left in the sector, at most the remaining clusters
+_F32_FMR_DIRECT MOVE    R4, R8                      ; selects the controller
+                ASUB    R5, 1                       ; (the byte is not used)
+                MOVE    0x0200, R7
+                SUB     R4, R7
+                SHR     2, R7
+                AND     0x00FF, R7                  ; 1 .. 128
+                CMP     0, R3
+                RBRA    _F32_FMR_DN, !Z
+                CMP     R7, R2                      ; remaining < R7?
+                RBRA    _F32_FMR_DN, !N
+                MOVE    R2, R7
+                CMP     0, R7                       ; (the caller excludes 0)
+                RBRA    _F32_FMR_END, Z
+_F32_FMR_DN     MOVE    IO$SD_DATA_POS, R5          ; R5: the cursor
+                MOVE    IO$SD_DATA, R12             ; R12: the byte
+                MOVE    R0, R10                     ; R11|R10: current + 1
+                MOVE    R1, R11
+                ADD     1, R10
+                ADDC    0, R11
+                ; one instruction between setting the cursor and reading the
+                ; byte, as in SD$READ_BYTE (the byte is a register that
+                ; follows the cursor on the next clock)
+_F32_FMR_DLOOP  MOVE    R4, @R5                     ; entry bits 15..0
+                ADD     1, R4
+                MOVE    @R12, R8
+                MOVE    R4, @R5
+                ADD     1, R4
+                MOVE    @R12, R9
+                SWAP    R9, R9
+                OR      R9, R8
+                CMP     R10, R8
+                RBRA    _F32_FMR_DSUM, !Z
+                MOVE    R4, @R5                     ; entry bits 27..16
+                ADD     1, R4
+                MOVE    @R12, R8
+                MOVE    R4, @R5
+                ADD     1, R4
+                MOVE    @R12, R9
+                AND     0x000F, R9
+                SWAP    R9, R9
+                OR      R9, R8
+                CMP     R11, R8
+                RBRA    _F32_FMR_DSUM, !Z
+                ADD     1, R6                       ; continues the extent
+                ADD     1, R10
+                ADDC    0, R11
+                SUB     1, R7
+                RBRA    _F32_FMR_DLOOP, !Z
+_F32_FMR_DSUM   ADD     R6, R0                      ; current += added
+                ADDC    0, R1
+                SUB     R6, R2                      ; remaining -= added
+                SUBC    0, R3
+                RBRA    _F32_FMR_END, 1
 ;
 ;*****************************************************************************
 ;* _F32_SEEK: the common core of FAT32$FILE_SEEK and FAT32$FILE_SEEK_MAP

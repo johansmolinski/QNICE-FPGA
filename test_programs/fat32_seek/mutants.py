@@ -5,7 +5,10 @@ interface and is therefore not part of this list. So is skipping the fast map
 path's check that the FAT sector of the current cluster is in the buffer
 (M2M-UPSTREAM fat32-fastmap): the path accepts only entries equal to
 "current + 1", which a wrong sector does not hold. flush_r9 survives on
-78aeaac as well.)
+78aeaac as well. In the direct reads, the limit to the remaining clusters is
+equivalent (the entry of the file's last cluster is an end of chain, never
+"current + 1"), the byte read call that selects the controller is too in the
+emulator's single SD card.) Every mutant runs with and without direct reads.
 usage: mutants.py <monitor dir> <work dir>"""
 import os, shutil, subprocess, sys
 mon, work = sys.argv[1], sys.argv[2]
@@ -29,6 +32,13 @@ M = {
                     "                ADD     1, R8\n                CMP     R8, R7"),
  "fast_count":     ("                ADD     4, R4\n                ADD     1, R6",
                     "                ADD     4, R4\n                ADD     2, R6"),
+ "fast_no_hi":     ("_F32_FMR_NC     CMP     R8, R7\n                RBRA    _F32_FMR_END, !Z",
+                    "_F32_FMR_NC     CMP     R8, R7"),
+ # the direct reads (FAT32$DEV_DIRECT, 2026-11-03)
+ "fastd_no_lo":    ("                CMP     R10, R8\n                RBRA    _F32_FMR_DSUM, !Z\n", ""),
+ "fastd_no_hi":    ("                CMP     R11, R8\n                RBRA    _F32_FMR_DSUM, !Z\n", ""),
+ "fastd_count":    ("                ADD     1, R6                       ; continues the extent\n                ADD     1, R10",
+                    "                ADD     2, R6                       ; continues the extent\n                ADD     1, R10"),
 }
 ok = True
 for name, (old, new) in M.items():
@@ -39,10 +49,11 @@ for name, (old, new) in M.items():
     open(os.path.join(d, "fat32_library.asm"), "w").write(src.replace(old, new))
     res = []
     for spc in (1, 8, 64):
-        out = subprocess.run(["bash", "-c", f'source <(sed -n "/^run_case()/,/^}}/p" {here}/run.sh); '
-                              f'H={here}; W={work}; run_case {d} {work}/case{spc} mutant'],
-                             capture_output=True, text=True).stdout
-        res.append("PASS" if "RESULT: PASS" in out and "HOSTCHECK: PASS" in out else "FAIL")
+        for cpp in ("", "-DT_NODIRECT"):
+            out = subprocess.run(["bash", "-c", f'source <(sed -n "/^run_case()/,/^}}/p" {here}/run.sh); '
+                                  f'H={here}; W={work}; T_CPP={cpp} run_case {d} {work}/case{spc} mutant'],
+                                 capture_output=True, text=True).stdout
+            res.append("PASS" if "RESULT: PASS" in out and "HOSTCHECK: PASS" in out else "FAIL")
     killed = "FAIL" in res
     ok &= killed
     print(f"{name:16s} {'killed' if killed else 'SURVIVED'}  {' '.join(res)}")
