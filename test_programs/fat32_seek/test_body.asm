@@ -30,8 +30,16 @@ TEST_MAIN       AND     0x00FF, SR
                 RSUB    IO$PUT_W_HEX, 1
                 HALT
 
+T_MOUNTED
+#ifdef T_NODIRECT
+                ; the map's fast path through the byte read function, as
+                ; for a device without direct buffer reads
+                MOVE    _SD$DEVICEHANDLE, R8
+                ADD     FAT32$DEV_DIRECT, R8
+                MOVE    0, @R8
+#endif
                 ; count the SD block reads by hooking the device function
-T_MOUNTED       MOVE    _SD$DEVICEHANDLE, R8
+                MOVE    _SD$DEVICEHANDLE, R8
                 ADD     FAT32$DEV_BLOCK_READ, R8
                 MOVE    T_ORIG_RD, R9
                 MOVE    @R8, @R9

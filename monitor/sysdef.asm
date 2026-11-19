@@ -338,7 +338,10 @@ FAT32$DEV_FSINFO_HI     .EQU    0x0018                  ; FSInfo sector (LBA): h
 FAT32$DEV_HINT_LO       .EQU    0x0019                  ; where the search for a free cluster starts: low word
 FAT32$DEV_HINT_HI       .EQU    0x001A                  ; where the search for a free cluster starts: high word
 
-FAT32$DEV_STRUCT_SIZE   .EQU    0x001B                  ; size (words) of the mount data structure (device handle)
+; M2M-UPSTREAM fat32-fastmap (MegaX 2026-11-03): FAT32$MOUNT clears it, FAT32$MOUNT_SD sets it
+FAT32$DEV_DIRECT        .EQU    0x001B                  ; 1: after a call of DEV_BYTE_READ the buffer can be read through IO$SD_DATA_POS / IO$SD_DATA
+
+FAT32$DEV_STRUCT_SIZE   .EQU    0x001C                  ; size (words) of the mount data structure (device handle)
 
 ; LAYOUT OF THE FILE HANDLE AND DIRECTORY HANDLE (FDH)
 
